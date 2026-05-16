@@ -8,6 +8,9 @@ L'approccio è rigorosamente causale: al tempo t, il modello vede solo dati <= t
 """
 import gc
 import pandas as pd
+from .hmm_cache import HMMCache
+from .exceptions import ModelInferenceError
+from .logging_config import setup_logging
 import numpy as np
 import pymc as pm
 import arviz as az

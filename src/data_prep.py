@@ -16,6 +16,8 @@ Vincoli fondamentali:
 """
 
 import pandas as pd
+from .data_validation import AISDataValidator, validate_and_adapt
+from .exceptions import DataValidationError
 import numpy as np
 import logging
 from typing import Dict, Optional, Tuple, Union
