@@ -1,0 +1,28 @@
+# .gitignore
+
+# Ambienti virtuali
+.venv/
+venv/
+env/
+
+# File Python compilati
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Dati (troppo pesanti per Git)
+data/raw/
+data/processed/
+*.parquet
+*.csv
+
+# Modelli salvati e Log
+models/
+logs/
+
+# IDE e OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
