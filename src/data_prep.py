@@ -235,10 +235,11 @@ class AISDataPreprocessor:
         
         # Y=1 se il gap col prossimo segnale è superiore alla soglia
         # (senza limite superiore: ci importa solo che ci sia un blackout, non quanto dura)
-        df[self.target_col] = (
-            (df['_gap_to_next'] >= gap_hours) & 
-            (df['_gap_to_next'].notna())  # Esclude l'ultima riga assoluta della nave
-        ).astype(int)
+        # Modifica in create_causal_target in data_prep.py:
+        df[self.target_col] = (df['_gap_to_next'] >= gap_hours).astype(float) # Float supporta i NaN
+        df.loc[df['_gap_to_next'].isna(), self.target_col] = np.nan # Forza l'ultima riga a NaN
+        df = df.dropna(subset=[self.target_col])
+        df[self.target_col] = df[self.target_col].astype(int) # Torna intero    
         
         df = df.drop(columns=['_next_timestamp', '_gap_to_next'])
         

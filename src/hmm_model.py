@@ -6,7 +6,7 @@ Questo modulo implementa un Bayesian Mixture Model con finestra scorrevole causa
 per estrarre probabilità di regime "sospetto" da serie temporali AIS.
 L'approccio è rigorosamente causale: al tempo t, il modello vede solo dati <= t.
 """
-
+import gc
 import pandas as pd
 import numpy as np
 import pymc as pm
@@ -201,7 +201,9 @@ class CausalBayesianMixture:
                     
                     probs_sospetto[t] = prob_t
                     incertezza[t] = var_t
-                    
+                    if use_advi and 'trace' in locals():
+                        del trace
+                    gc.collect()
                 except Exception as e:
                     logging.debug(f"Errore inferenza a t={t}: {e}")
                     continue

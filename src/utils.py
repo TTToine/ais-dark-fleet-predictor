@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import average_precision_score
 from typing import Callable, Tuple, List, Optional
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -17,6 +18,37 @@ logging.basicConfig(level=logging.INFO)
 # ========================================================================
 # STATISTICAL LEARNING TOOLS
 # ========================================================================
+
+def filter_high_vif(X: pd.DataFrame, threshold: float = 10.0) -> list:
+    """
+    Calcola il VIF e restituisce la lista delle feature da mantenere (VIF <= threshold).
+    Rimuove le feature iterativamente partendo da quella con VIF più alto.
+    """
+    logging.info(f"Calcolo VIF per filtro multicollinearità (Soglia: {threshold})...")
+    
+    # Lavoriamo su una copia per non modificare l'originale
+    X_calc = X.copy()
+    
+    # Eliminiamo eventuali feature con varianza zero per evitare divisioni per zero
+    X_calc = X_calc.loc[:, X_calc.std() > 0]
+    
+    features = X_calc.columns.tolist()
+    
+    while True:
+        # Calcoliamo il VIF per ogni feature
+        vif_data = [variance_inflation_factor(X_calc[features].values, i) for i in range(len(features))]
+        max_vif = max(vif_data)
+        max_vif_idx = vif_data.index(max_vif)
+        
+        if max_vif > threshold:
+            removed_feat = features[max_vif_idx]
+            logging.info(f"Rimosso {removed_feat} (VIF: {max_vif:.2f} > {threshold})")
+            del features[max_vif_idx]
+        else:
+            break
+            
+    logging.info(f"Feature mantenute post-VIF: {features}")
+    return features
 
 def bootstrap_confidence_interval(
     y_true: np.ndarray, 

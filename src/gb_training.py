@@ -206,7 +206,9 @@ class DarkFleetPredictor:
         study.optimize(
             lambda trial: self.objective(trial, X, y, features), 
             n_trials=self.n_trials, 
-            show_progress_bar=True
+            show_progress_bar=True,
+            n_jobs=4,
+            catch=(RuntimeError,)
         )
 
         self.best_params = study.best_trial.params
@@ -246,12 +248,22 @@ class DarkFleetPredictor:
         logging.info(f"✅ Modello finale: {self.best_model.best_iteration} boosting rounds")
 
     def evaluate_model(self, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
-        """Valuta il modello su test set temporale (futuro assoluto)."""
         if self.best_model is None:
             raise ValueError("Addestra prima il modello con optimize_and_train()")
 
         preds_proba = self.best_model.predict(X_test)
         
+        # --- NUOVO: Conformal Prediction ---
+        from src.utils import calculate_conformal_threshold
+        try:
+            # Calcoliamo la soglia per avere al massimo il 5% di Falsi Positivi
+            # Nota: in produzione questo andrebbe calcolato su un validation set separato
+            sicurezza_95_threshold = calculate_conformal_threshold(y_test.values, preds_proba, target_fpr=0.05)
+            allarmi_generati = (preds_proba >= sicurezza_95_threshold).sum()
+            logging.info(f"🛡️ Conformal Threshold (5% FPR): {sicurezza_95_threshold:.4f}")
+            logging.info(f"🚨 Allarmi Dark Fleet scattati: {allarmi_generati} su {len(y_test)} navi")
+        except Exception as e:
+            logging.warning(f"Conformal prediction non calcolabile: {e}")
         # Metriche principali
         metrics = {
             'pr_auc': average_precision_score(y_test, preds_proba),
@@ -286,71 +298,89 @@ class DarkFleetPredictor:
         plt.show()
 
     def plot_feature_importance_shap(self, X_sample: pd.DataFrame, max_display: int = 10):
-        """
-        Plot SHAP per importanza feature robusta (non biasata da gain/weight).
-        Usa un campione per velocità.
-        """
         if self.best_model is None:
             raise ValueError("Addestra prima il modello")
             
         logging.info("Calcolo SHAP values (potrebbe richiedere tempo)...")
         
-        # Campiona per velocità se dataset grande
+        # Campiona per velocità
         if len(X_sample) > 1000:
             X_sample = X_sample.sample(n=1000, random_state=self.seed)
+            
+        # --- NUOVO: Filtro VIF ---
+        from src.utils import filter_high_vif
+        safe_features = filter_high_vif(X_sample, threshold=10.0)
+        X_sample_safe = X_sample[safe_features]
+        # -------------------------
         
         explainer = shap.TreeExplainer(self.best_model)
-        shap_values = explainer.shap_values(X_sample)
+        shap_values = explainer.shap_values(X_sample_safe)
         
         plt.figure(figsize=(10, 8))
-        shap.summary_plot(shap_values, X_sample, max_display=max_display, show=False)
-        plt.title("SHAP Feature Importance - Contributo Marginale alle Predizioni")
+        shap.summary_plot(shap_values, X_sample_safe, max_display=max_display, show=False)
+        plt.title("SHAP Feature Importance (VIF Filtered)")
         plt.tight_layout()
-        plt.savefig("models/shap_importance.png", dpi=300)
-        logging.info("📊 SHAP plot salvato in models/shap_importance.png")
+        plt.savefig("models/shap_importance_vif.png", dpi=300)
+        logging.info("📊 SHAP plot salvato in models/shap_importance_vif.png")
         plt.show()
-        
-        # Return top features per ablation study
-        if isinstance(shap_values, list):
-            # Multi-class (non dovrebbe accadere con binary)
-            shap_arr = np.abs(shap_values[1]).mean(0)
-        else:
-            shap_arr = np.abs(shap_values).mean(0)
-            
-        feature_importance = pd.DataFrame({
-            'feature': X_sample.columns,
-            'shap_value': shap_arr
-        }).sort_values('shap_value', ascending=False)
-        
-        return feature_importance
 
     def ablation_study(self, test_df: pd.DataFrame, train_df: pd.DataFrame, 
                       n_trials_ablation: int = 10) -> dict:
         """
-        Confronto strutturato: modello con vs senza feature bayesiane.
+        Confronto strutturato: Logistic Regression vs GB Baseline vs GB Enhanced.
         Include test di significatività statistica tramite Grouped Bootstrap.
         """
-        logging.info("🔬 Avvio Ablation Study: Baseline vs Enhanced")
+        logging.info("🔬 Avvio Ablation Study: Logistic Baseline vs GB Baseline vs GB Enhanced")
         
         results = {}
         # Creiamo un DataFrame per salvare le predizioni sul Test Set
         df_bootstrap = test_df[['MMSI', 'target_dark_fleet']].copy()
         
-        for config_name, features in [
-            ("baseline", self.features_baseline),
-            ("enhanced", self.features_full)
-        ]:
+        # Definizione delle configurazioni: (Nome, Feature List, Usa LogisticRegression)
+        configurations = [
+            ("logistic_baseline", self.features_baseline, True),
+            ("gb_baseline", self.features_baseline, False),
+            ("gb_enhanced", self.features_full, False)
+        ]
+        
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.metrics import average_precision_score
+        
+        for config_name, features, use_logistic in configurations:
             logging.info(f"\n--- Addestramento Configurazione: {config_name} ---")
             
+            X_train, y_train = self.prepare_data_for_cv(train_df, feature_list=features)
+            X_test, y_test = self.prepare_data_for_cv(test_df, feature_list=features)
+            
+            if use_logistic:
+                logging.info("Addestramento Logistic Regression (Dumb Baseline)...")
+                # La regressione logistica richiede dati standardizzati e senza NaN
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train.fillna(0))
+                X_test_scaled = scaler.transform(X_test.fillna(0))
+                
+                lr_model = LogisticRegression(class_weight='balanced', max_iter=1000, random_state=self.seed)
+                lr_model.fit(X_train_scaled, y_train)
+                
+                # Salviamo le probabilità per la classe positiva (1)
+                preds_proba = lr_model.predict_proba(X_test_scaled)[:, 1]
+                pr_auc = average_precision_score(y_test, preds_proba)
+                
+                # Salvataggio risultati
+                df_bootstrap[f'pred_{config_name}'] = preds_proba
+                results[config_name] = {'model': lr_model, 'pr_auc': pr_auc}
+                
+                logging.info(f"✅ {config_name} completato: PR-AUC={pr_auc:.4f}")
+                continue
+                
+            # --- Se non è logistica, addestra Gradient Boosting (LightGBM) ---
             predictor = DarkFleetPredictor(
                 n_trials=n_trials_ablation,
                 n_splits=self.n_splits,
                 gap_hours=self.gap_hours,
                 seed=self.seed
             )
-            
-            X_train, y_train = self.prepare_data_for_cv(train_df, feature_list=features)
-            X_test, y_test = self.prepare_data_for_cv(test_df, feature_list=features)
             
             predictor.optimize_and_train(X_train, y_train, feature_list=features)
             metrics = predictor.evaluate_model(X_test, y_test)
@@ -367,6 +397,33 @@ class DarkFleetPredictor:
             }
             logging.info(f"✅ {config_name} completato: PR-AUC={metrics['pr_auc']:.4f}")
         
+        # ==========================================
+        # STATISTICAL SIGNIFICANCE TEST (BOOTSTRAP)
+        # ==========================================
+        from src.utils import compare_models_grouped_bootstrap
+        
+        logging.info("\n📊 Calcolo Significatività Statistica (Grouped Bootstrap)...")
+        # Confrontiamo il GB potenziato (A) contro il GB standard (B)
+        boot_stats = compare_models_grouped_bootstrap(
+            df_results=df_bootstrap,
+            group_col='MMSI',
+            target_col='target_dark_fleet',
+            pred_col_a='pred_gb_enhanced', 
+            pred_col_b='pred_gb_baseline',
+            n_bootstraps=1000,
+            seed=self.seed
+        )
+        
+        logging.info(f"🎯 Delta PR-AUC Medio (Enhanced vs GB Baseline): {boot_stats['delta_mean']:+.4f}")
+        logging.info(f"📈 95% Confidence Interval: [{boot_stats['ci_lower']:+.4f}, {boot_stats['ci_upper']:+.4f}]")
+        
+        if boot_stats['significant']:
+            logging.info("✅ VITTORIA SIGNIFICATIVA: Il modello HMM migliora in modo statisticamente robusto le performance rispetto alla baseline LightGBM.")
+        else:
+            logging.warning("⚠️ PAREGGIO STATISTICO: Il CI include lo zero. Il miglioramento potrebbe essere casuale.")
+            
+        results['bootstrap_stats'] = boot_stats
+        return results
         # ==========================================
         # STATISTICAL SIGNIFICANCE TEST (BOOTSTRAP)
         # ==========================================
