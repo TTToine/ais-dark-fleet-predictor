@@ -10,3 +10,10 @@ hmm_model: { window_size: 36, caching: { enabled: true, backend: "joblib", ttl_h
 gb_training: { n_trials: 50, n_splits: 5, gap_hours: 24.0 }
 logging: { level: "INFO", format: "%(asctime)s - %(levelname)s - %(message)s", file: "logs/pipeline.log" }
 performance: { n_jobs: -1, chunk_size_ships: 100, memory_limit_gb: 14 }
+
+# --- Conformal Integration ---
+conformal:
+  enabled: true
+  alpha: 0.1
+  method: "enbpi"
+  adaptive: true

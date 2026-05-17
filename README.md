@@ -88,3 +88,9 @@ The script autonomously executes data preparation, Bayesian inference, and HPO t
 ```
 
 ```
+
+# --- Conformal Integration ---
+
+## 🎯 Conformal Prediction
+Integrated uncertainty quantification using EnbPI/Split Conformal.
+

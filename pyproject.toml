@@ -21,3 +21,7 @@ dependencies = [
     "pyyaml>=6.0",
     "statsmodels>=0.14.0"
 ]
+[project.dependencies]
+plotly>=5.18.0  # Conformal
+nonconformist>=2.1.0  # Conformal
+mlconformal>=0.2.0
