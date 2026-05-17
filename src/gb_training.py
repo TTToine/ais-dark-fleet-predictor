@@ -212,7 +212,6 @@ class DarkFleetPredictor:
         )
 
         self.best_params = study.best_trial.params
-        # Aggiungiamo parametri fissi non ottimizzati
         self.best_params.update({
             'objective': 'binary',
             'metric': 'binary_logloss', 
@@ -226,7 +225,6 @@ class DarkFleetPredictor:
         # Training finale con early stopping su holdout interno
         logging.info("Addestramento modello finale con early stopping...")
         
-        # Split 90/10 per early stopping (temporale: ultimi 10%)
         split_idx = int(len(X) * 0.9)
         X_train_final, X_val = X.iloc[:split_idx], X.iloc[split_idx:]
         y_train_final, y_val = y.iloc[:split_idx], y.iloc[split_idx:]
@@ -234,36 +232,88 @@ class DarkFleetPredictor:
         train_data = lgb.Dataset(X_train_final, label=y_train_final)
         val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
         
-        self.best_model = lgb.train(
+        # 1. Addestra il modello LightGBM base
+        base_model = lgb.train(
             self.best_params,
             train_data,
             valid_sets=[val_data],
-            num_boost_round=2000,  # Alto, fermato da early stopping
+            num_boost_round=2000,
             callbacks=[
                 lgb.early_stopping(stopping_rounds=50, verbose=True),
                 lgb.log_evaluation(period=100)
             ]
         )
         
-        logging.info(f"✅ Modello finale: {self.best_model.best_iteration} boosting rounds")
+        logging.info(f"✅ Modello base addestrato: {base_model.best_iteration} boosting rounds")
 
-    def evaluate_model(self, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
+        # ========================================================================
+        # [NUOVO] INTEGRAZIONE CONFORMAL PREDICTION
+        # Calibrazione sul Validation Set (X_val, y_val)
+        # ========================================================================
+        try:
+            from src.models.conformal_wrapper import ConformalLightGBMClassifier
+            from src.evaluation.conformal import ConformalConfig, create_conformal_predictor
+            
+            logging.info("🔧 Avvio calibrazione Conformal Prediction...")
+            
+            # Inizializza wrapper
+            self.best_model = ConformalLightGBMClassifier(
+                conformal_alpha=0.1, # Target 90% coverage
+                lgb_params=self.best_params
+            )
+            
+            # Assegna il modello base già addestrato
+            self.best_model.model_ = base_model
+            
+            # Calibra usando le probabilità predette sul validation set
+            y_val_pred_probs = base_model.predict(X_val)
+            
+            cp_config = ConformalConfig(alpha=0.1, method="enbpi", adaptive=True)
+            cp = create_conformal_predictor(cp_config)
+            cp.fit(y_val, y_val_pred_probs)
+            
+            self.best_model.conformal_ = cp
+            self.best_model.is_calibrated_ = True
+            
+            # Verifica rapida copertura
+            lower, upper = cp.predict_interval(y_val_pred_probs)
+            coverage = cp.get_coverage(y_val, lower, upper)
+            logging.info(f"✅ Conformal Calibration Completa. Empirical Coverage: {coverage:.2%} (Target: 90%)")
+            
+        except Exception as e:
+            logging.error(f"❌ Errore integrazione Conformal: {e}")
+            logging.warning("⚠️ Fallback al modello base LightGBM senza conformal.")
+            self.best_model = base_model # Fallback
+        # ========================================================================
+
+    
+        def evaluate_model(self, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
         if self.best_model is None:
             raise ValueError("Addestra prima il modello con optimize_and_train()")
 
-        preds_proba = self.best_model.predict(X_test)
-        
-        # --- NUOVO: Conformal Prediction ---
-        from src.utils import calculate_conformal_threshold
+        # Gestione flessibile: sia Wrapper Conformal che LGBM Base
+        if hasattr(self.best_model, 'predict_proba_with_interval'):
+            # Caso Conformal Wrapper
+            preds_proba, lower, upper = self.best_model.predict_proba_with_interval(X_test)
+            logging.info("📊 Valutazione con intervalli Conformal Prediction")
+        else:
+            # Caso LGBM Base
+            preds_proba = self.best_model.predict(X_test)
+            lower, upper = None, None
+            logging.info("📊 Valutazione modello base (no Conformal)")
+
+        # --- NUOVO: Logica Conformal Threshold (opzionale, se vuoi mantenere la vecchia logica) ---
+        # Nota: Se usi il Wrapper, gli intervalli sono già calcolati. 
+        # La soglia fissa FPR è meno utile degli intervalli dinamici, ma la lasciamo per compatibilità.
         try:
-            # Calcoliamo la soglia per avere al massimo il 5% di Falsi Positivi
-            # Nota: in produzione questo andrebbe calcolato su un validation set separato
+            from src.utils import calculate_conformal_threshold
             sicurezza_95_threshold = calculate_conformal_threshold(y_test.values, preds_proba, target_fpr=0.05)
             allarmi_generati = (preds_proba >= sicurezza_95_threshold).sum()
             logging.info(f"🛡️ Conformal Threshold (5% FPR): {sicurezza_95_threshold:.4f}")
             logging.info(f"🚨 Allarmi Dark Fleet scattati: {allarmi_generati} su {len(y_test)} navi")
         except Exception as e:
-            logging.warning(f"Conformal prediction non calcolabile: {e}")
+            pass # Ignora se utils non presente o errore
+        
         # Metriche principali
         metrics = {
             'pr_auc': average_precision_score(y_test, preds_proba),
@@ -272,11 +322,23 @@ class DarkFleetPredictor:
             'brier_score': brier_score_loss(y_test, preds_proba)
         }
         
+        # Se abbiamo intervalli, calcoliamo la copertura empirica sul test set
+        if lower is not None and upper is not None:
+            from src.evaluation.conformal import ConformalPredictor # Import temporaneo per get_coverage
+            # Creiamo un predictor dummy per usare il metodo di calcolo
+            cp_dummy = ConformalPredictor.__new__(ConformalPredictor) 
+            # In realtà basta calcolare manualmente:
+            covered = (y_test.values >= lower) & (y_test.values <= upper)
+            metrics['empirical_coverage'] = np.mean(covered)
+            metrics['mean_interval_width'] = np.mean(upper - lower)
+            logging.info(f"🎯 Test Set Coverage: {metrics['empirical_coverage']:.2%}")
+            logging.info(f"📏 Mean Interval Width: {metrics['mean_interval_width']:.3f}")
+
         logging.info("\n" + "="*60)
-        logging.info("📊 RISULTATI FINALI SUL TEST SET (FUTURO)")
+        logging.info("📊 RISULTATI FINALI SUL TEST SET")
         logging.info("="*60)
         for name, value in metrics.items():
-            logging.info(f"{name:15s}: {value:.4f}")
+            logging.info(f"{name:25s}: {value:.4f}")
         logging.info("="*60 + "\n")
         
         return metrics
@@ -428,7 +490,7 @@ class DarkFleetPredictor:
         # STATISTICAL SIGNIFICANCE TEST (BOOTSTRAP)
         # ==========================================
         from src.utils import compare_models_grouped_bootstrap
-        
+
         logging.info("\n📊 Calcolo Significatività Statistica (Grouped Bootstrap)...")
         boot_stats = compare_models_grouped_bootstrap(
             df_results=df_bootstrap,
@@ -453,6 +515,9 @@ class DarkFleetPredictor:
 
 
 if __name__ == "__main__":
+    import joblib
+    import os
+    
     # ========================================================================
     # TEST DI INTEGRAZIONE: Pipeline completa con mock data realistico
     # ========================================================================
@@ -461,10 +526,9 @@ if __name__ == "__main__":
     np.random.seed(42)
     n_samples = 2000
     
-    # Simulazione dati AIS con struttura temporale e correlazioni realistiche
+    # ... [TUTTO IL CODICE DI GENERAZIONE MOCK DATA RIMANE UGUALE] ...
     timestamps = pd.date_range('2024-06-01', periods=n_samples, freq='10min')
     
-    # Feature cinematiche con autocorrelazione temporale (simulazione realistica)
     def generate_temporal_series(mean, std, n, autocorr=0.7):
         series = np.zeros(n)
         series[0] = np.random.normal(mean, std)
@@ -481,21 +545,17 @@ if __name__ == "__main__":
         'dt_prev_hours': np.abs(generate_temporal_series(0.16, 0.03, n_samples, autocorr=0.9)),
     })
     
-    # Feature bayesiane simulate: prob_regime_sospetto correlata con pattern di "sospetto"
-    # Creiamo un segnale latente che simula il comportamento "sospetto"
     latent_suspicious = (
-        (mock_data['speed_acc'].abs() < 0.3).astype(int) * 0.4 +  # Bassa accelerazione
-        (mock_data['turn_rate'].abs() > 3).astype(int) * 0.4 +    # Alte virate
-        np.random.normal(0, 0.1, n_samples)  # Rumore
+        (mock_data['speed_acc'].abs() < 0.3).astype(int) * 0.4 +
+        (mock_data['turn_rate'].abs() > 3).astype(int) * 0.4 +
+        np.random.normal(0, 0.1, n_samples)
     )
     latent_suspicious = (latent_suspicious - latent_suspicious.min()) / (latent_suspicious.max() - latent_suspicious.min())
     
     mock_data['prob_regime_sospetto'] = latent_suspicious
-    mock_data['incertezza_regime'] = np.random.uniform(0.05, 0.25, n_samples)  # Incertezza variabile
+    mock_data['incertezza_regime'] = np.random.uniform(0.05, 0.25, n_samples)
     
-    # Target: blackout intenzionale, debolmente correlato con regime sospetto + rumore
-    # Probabilità di blackout aumenta con prob_regime_sospetto ma non è deterministico
-    base_prob = 0.02  # Rarità dei blackout
+    base_prob = 0.02
     prob_blackout = np.clip(base_prob + mock_data['prob_regime_sospetto'] * 0.15, 0, 1)
     mock_data['target_dark_fleet'] = np.random.binomial(1, prob_blackout)
     
@@ -505,34 +565,51 @@ if __name__ == "__main__":
     # ESECUZIONE PIPELINE
     # ========================================================================
     predictor = DarkFleetPredictor(
-        n_trials=5,      # Pochi trial per test veloce
+        n_trials=5,      
         n_splits=3,
-        gap_hours=2.0,   # Gap ridotto per test (in produzione: 24h)
+        gap_hours=2.0,   
         freq_min=10,
         seed=42
     )
     
-    # Split temporale causale: ultimi 20% come test set assoluto
     split_idx = int(len(mock_data) * 0.8)
     train_df = mock_data.iloc[:split_idx].copy()
     test_df = mock_data.iloc[split_idx:].copy()
     
-    # Preparazione dati
     X_train, y_train = predictor.prepare_data_for_cv(train_df)
     X_test, y_test = predictor.prepare_data_for_cv(test_df)
     
-    # HPO + Training
+    # HPO + Training (Ora include Conformal Calibration interna)
     predictor.optimize_and_train(X_train, y_train)
     
-    # Valutazione finale
+    # Valutazione finale (Ora mostra Coverage e Interval Width se Conformal è attivo)
     metrics = predictor.evaluate_model(X_test, y_test)
     
-    # Visualizzazioni (salvate su file)
+    # Visualizzazioni
     try:
         predictor.plot_calibration(X_test, y_test)
         predictor.plot_feature_importance_shap(X_test)
     except Exception as e:
         logging.warning(f"Plot generation skipped: {e}")
     
+    # ========================================================================
+    # [NUOVO] SALVATAGGIO MODELLO
+    # Salva l'oggetto predictor completo (che contiene best_model)
+    # Oppure salva solo best_model se preferisci caricarlo direttamente nella dashboard
+    # ========================================================================
+    
+    output_dir = "models"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Opzione A: Salva tutto il predictor (utile per riprendere training)
+    joblib.dump(predictor, os.path.join(output_dir, "predictor_full.pkl"))
+    
+    # Opzione B: Salva solo il modello finale (best_model) per la dashboard
+    # Questo è cruciale: se best_model è il ConformalWrapper, salverà anche la calibrazione!
+    joblib.dump(predictor.best_model, os.path.join(output_dir, "best_model.pkl"))
+    
+    logging.info(f"💾 Modelli salvati in: {output_dir}/")
+    logging.info("   - predictor_full.pkl (oggetto completo)")
+    logging.info("   - best_model.pkl (modello pronto per inference/dashboard)")
+    
     logging.info("\n✅ TEST INTEGRAZIONE COMPLETATO CON SUCCESSO")
-    logging.info("📁 Output salvati in: models/")

@@ -94,3 +94,16 @@ The script autonomously executes data preparation, Bayesian inference, and HPO t
 ## 🎯 Conformal Prediction
 Integrated uncertainty quantification using EnbPI/Split Conformal.
 
+
+## 🎨 Dashboard Interattiva
+Il progetto include una dashboard Streamlit completa:
+
+### Avvio Dashboard
+```bash
+# Con dati demo
+python src/dashboard/data_loader.py --generate-demo
+streamlit run app.py
+
+# Oppure con Docker
+docker build -f Dockerfile.dashboard -t ais-dashboard .
+docker run -p 8501:8501 ais-dashboard
