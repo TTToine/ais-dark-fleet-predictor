@@ -199,10 +199,10 @@ class AISDataPreprocessor:
         gap_hours = self.gap_threshold.total_seconds() / 3600.0
         horizon_hours = self.prediction_horizon.total_seconds() / 3600.0
         
-        # Target: qualsiasi blackout (gap >= threshold) che si verifica entro horizon_hours
+        # Target: gap >= threshold E che termina entro horizon_hours dal gap stesso
         df[self.target_col] = (
             (df['_gap_to_next'] >= gap_hours) &
-            (df['_gap_to_next'] <= horizon_hours)
+            (df['_gap_to_next'] <= gap_hours + horizon_hours)
         ).astype(float)
         
         # L'ultima osservazione per nave non ha un "prossimo ping", quindi target sconosciuto
@@ -223,7 +223,99 @@ class AISDataPreprocessor:
             
         return df
 
-    def run_pipeline(self, 
+    def add_spatial_features(self, df: pd.DataFrame,
+                             coastline_path: Optional[str] = None,
+                             fishing_zones_path: Optional[str] = None,
+                             commercial_routes_path: Optional[str] = None) -> pd.DataFrame:
+        """
+        Aggiunge feature spaziali al DataFrame: distanza dalla costa, da zone di pesca
+        note (GFW) e da rotte commerciali principali.
+
+        Le distanze sono calcolate in miglia nautiche (nm) tramite proiezione metrica
+        (EPSG:3857) e successiva conversione. Richiede geopandas.
+
+        Se coastline_path non è fornito, usa i dati naturalearth inclusi in geopandas
+        come fallback (bassa risoluzione, sufficiente per l'analisi a scala regionale).
+        I path per fishing_zones e commercial_routes sono opzionali: se assenti, le
+        feature corrispondenti non vengono calcolate.
+
+        Feature prodotte (se i dati sono disponibili):
+            - dist_coast_nm
+            - dist_fishing_zone_nm   (richiede fishing_zones_path)
+            - dist_commercial_route_nm (richiede commercial_routes_path)
+        """
+        try:
+            import geopandas as gpd
+            from shapely.ops import unary_union
+        except ImportError:
+            raise ImportError(
+                "geopandas e shapely sono richiesti per le feature spaziali: "
+                "pip install geopandas"
+            )
+
+        logging.info("Calcolo feature spaziali (distanze in miglia nautiche)...")
+        df = df.copy()
+
+        # Crea GeoDataFrame dei punti nave in CRS metrico
+        gdf_pts = gpd.GeoDataFrame(
+            df[['Lat', 'Lon']].copy(),
+            geometry=gpd.points_from_xy(df['Lon'], df['Lat']),
+            crs='EPSG:4326'
+        ).to_crs('EPSG:3857')
+
+        def _load_and_project(path: Optional[str], fallback_fn=None):
+            if path:
+                gdf = gpd.read_file(path)
+            elif fallback_fn is not None:
+                gdf = fallback_fn()
+            else:
+                return None
+            return unary_union(gdf.to_crs('EPSG:3857').geometry)
+
+        def _dist_nm(geometry_union) -> np.ndarray:
+            """Distanza vettorizzata dalla geometria in miglia nautiche."""
+            dist_m = gdf_pts.geometry.distance(geometry_union).values
+            return dist_m / 1852.0
+
+        # ── Coastline ──────────────────────────────────────────────────────────
+        def _naturalearth_coast():
+            try:
+                from geodatasets import get_path
+                return gpd.read_file(get_path('naturalearth.land'))
+            except Exception:
+                return gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
+
+        if coastline_path is None:
+            logging.warning("coastline_path non fornito: uso naturalearth_lowres (bassa risoluzione).")
+
+        coast_union = _load_and_project(coastline_path, _naturalearth_coast)
+        if coast_union is not None:
+            logging.info("  Calcolo dist_coast_nm...")
+            df['dist_coast_nm'] = _dist_nm(coast_union)
+
+        # ── Fishing zones (GFW shapefile) ──────────────────────────────────────
+        fish_union = _load_and_project(fishing_zones_path)
+        if fish_union is not None:
+            logging.info("  Calcolo dist_fishing_zone_nm...")
+            df['dist_fishing_zone_nm'] = _dist_nm(fish_union)
+        else:
+            logging.info("  fishing_zones_path non fornito: dist_fishing_zone_nm non calcolata.")
+
+        # ── Commercial routes ──────────────────────────────────────────────────
+        routes_union = _load_and_project(commercial_routes_path)
+        if routes_union is not None:
+            logging.info("  Calcolo dist_commercial_route_nm...")
+            df['dist_commercial_route_nm'] = _dist_nm(routes_union)
+        else:
+            logging.info("  commercial_routes_path non fornito: dist_commercial_route_nm non calcolata.")
+
+        spatial_feats = [c for c in
+                         ['dist_coast_nm', 'dist_fishing_zone_nm', 'dist_commercial_route_nm']
+                         if c in df.columns]
+        logging.info(f"Feature spaziali calcolate: {spatial_feats}")
+        return df
+
+    def run_pipeline(self,
                     input_path: Union[str, Path],
                     output_path: Union[str, Path],
                     return_df: bool = False) -> Optional[pd.DataFrame]:

@@ -1,3 +1,18 @@
+# ============================================================================
+# DEPRECATO — NON UTILIZZATO NELLA PIPELINE PRINCIPALE
+# ============================================================================
+# Questo modulo implementa Conformal Prediction per regressione (intervalli
+# attorno a una stima puntuale). È concettualmente errato per il task di
+# classificazione binaria di questo progetto.
+#
+# Il corretto approccio conforme per classificatori binari è in:
+#   src/utils.py → calculate_conformal_threshold()
+#   src/gb_training.py → DarkFleetPredictor.evaluate_with_conformal()
+#
+# Questo file è mantenuto perché importato da tests/test_conformal.py.
+# Non importare da questo modulo in codice di produzione.
+# ============================================================================
+
 import numpy as np
 import pandas as pd
 from typing import Union, Tuple, Optional, List

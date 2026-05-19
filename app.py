@@ -27,8 +27,8 @@ st.set_page_config(
 )
 
 def load_real_predictions(
-    model_path: str = "models/best_model.pkl", 
-    features_path: str = "data/processed/ais_features.parquet"
+    model_path: str = "models/lgb_dark_fleet.pkl",
+    features_path: str = "data/processed/ais_enriched.parquet"
 ) -> pd.DataFrame:
     """
     Carica i dati AIS e genera predizioni usando il modello reale salvato.
@@ -45,7 +45,7 @@ def load_real_predictions(
     df = pd.read_parquet(features_path)
     
     # 3. Identifica colonne feature (semplificato: esclude target e ID)
-    exclude_cols = ['mmsi', 'timestamp', 'ship_name', 'target_dark_fleet']
+    exclude_cols = ['MMSI', 'Timestamp', 'ship_name', 'target_dark_fleet']
     feature_cols = [c for c in df.columns if c not in exclude_cols]
     
     X = df[feature_cols]

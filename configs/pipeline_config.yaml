@@ -1,19 +1,35 @@
-project:
-  name: "ais-dark-fleet-predictor"
-  version: "1.0.0"
-geography:
-  default_bbox: { min_lat: 34.0, max_lat: 39.0, min_lon: 10.0, max_lon: 16.0 }
-  regions:
-    mediterranean: { bbox: { min_lat: 30.0, max_lat: 46.0, min_lon: -6.0, max_lon: 36.0 }, gap_threshold_hours: 12.0 }
-data_prep: { gap_threshold_hours: 12.0, downsampling_interval_minutes: 10 }
-hmm_model: { window_size: 36, caching: { enabled: true, backend: "joblib", ttl_hours: 24 } }
-gb_training: { n_trials: 50, n_splits: 5, gap_hours: 24.0 }
-logging: { level: "INFO", format: "%(asctime)s - %(levelname)s - %(message)s", file: "logs/pipeline.log" }
-performance: { n_jobs: -1, chunk_size_ships: 100, memory_limit_gb: 14 }
+paths:
+  raw_input: "data/raw/ais_sample.parquet"
+  processed_output: "data/processed/ais_v1.parquet"
+  models_dir: "models"
+  metrics_file: "models/metrics_final.json"
+  enriched_dataset: "data/processed/ais_enriched.parquet"
 
-# --- Conformal Integration ---
-conformal:
-  enabled: true
-  alpha: 0.1
-  method: "enbpi"
-  adaptive: true
+data_prep:
+  bounding_box: { min_lat: 35.0, max_lat: 38.0, min_lon: 11.0, max_lon: 15.5 }
+  gap_threshold_hours: 12.0
+  prediction_horizon_hours: 24.0
+  downsample_minutes: 10
+  min_sog: 0.0
+  max_sog: 50.0
+  seed: 42
+
+hmm:
+  window_size: 36
+  use_advi: true
+  sigma_prior_speed: 1.0
+  sigma_prior_turn: 2.0
+  n_jobs: -1   # -1 = tutti i core - 1; 1 = sequenziale (utile per debug)
+
+gb:
+  n_trials: 30
+  n_splits: 5
+  gap_hours: 24.0
+  freq_min: 10
+  seed: 42
+
+pipeline:
+  train_split_ratio: 0.8
+  run_ablation_study: false
+  save_enriched_data: true
+  run_post_training_analysis: true
