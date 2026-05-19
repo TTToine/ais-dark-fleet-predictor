@@ -19,9 +19,9 @@ The project is structured into three isolated modules, strictly designed to prev
    - Labeling via **Last Ping Prediction**: The target is exclusively anchored to the final valid signal preceding a prolonged blackout.
 
 2. **`src/hmm_model.py` (Bayesian Latent Regime Extraction)**
-   - A Bayesian Mixture Model (BMM) estimates the probability that a vessel is operating in a "suspicious" kinematic regime (loitering/fishing) versus a "normal" regime (transit).
-   - Inference is executed over a **strictly causal rolling window** utilizing Automatic Differentiation Variational Inference (ADVI) in PyMC.
-   - The module extracts both the point estimate (posterior probability) and the epistemic uncertainty (posterior variance).
+   - Implements a **Bayesian Mixture Model (BMM)** — *not* a Hidden Markov Model despite the filename, which is a historical artifact. There is no learned transition matrix and no MCMC/Gibbs sampling.
+   - Inference is performed via **Automatic Differentiation Variational Inference (ADVI)** in PyMC over a strictly causal rolling window. A Markov smoothing filter is applied *post-hoc* (deterministically) to impose temporal continuity on the posterior probabilities.
+   - The module extracts both the point estimate (`prob_regime_sospetto`: posterior probability of the suspicious regime) and epistemic uncertainty (`incertezza_regime`: posterior variance).
 
 3. **`src/gb_training.py` (Supervised Learning & Validation)**
    - Gradient Boosting (`LightGBM`) optimized via `Optuna`.
@@ -85,16 +85,6 @@ The script autonomously executes data preparation, Bayesian inference, and HPO t
 2. **Short Blackouts (False Negatives):** Rapid "tactical" deactivations (e.g., < 6 hours) intended to mask specific maneuvers are not captured by the current 12-hour target threshold. Sensitivity analysis regarding the `gap_threshold_hours` parameter can be configured via the YAML file.
 3. **Concept Drift and Geographic Bias:** The model is calibrated to the navigational dynamics and topology of the Strait of Sicily. Deployment in Out-of-Distribution scenarios (e.g., the Pacific Ocean) will require geographic fine-tuning of the Bayesian priors and complete retraining of the discriminative model.
 
-```
-
-```
-
-# --- Conformal Integration ---
-
-## 🎯 Conformal Prediction
-Integrated uncertainty quantification using EnbPI/Split Conformal.
-
-
 ## 🎨 Dashboard Interattiva
 Il progetto include una dashboard Streamlit completa:
 
@@ -107,3 +97,4 @@ streamlit run app.py
 # Oppure con Docker
 docker build -f Dockerfile.dashboard -t ais-dashboard .
 docker run -p 8501:8501 ais-dashboard
+```
