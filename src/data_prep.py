@@ -18,10 +18,6 @@ import warnings
 from typing import Dict, Optional, Tuple, Union
 from pathlib import Path
 
-# 🔴 FIX 2: Rimossi import di moduli inesistenti (data_validation, exceptions)
-# Se in futuro servono, vanno creati o gestiti con fallback. Per ora bloccavano la compilazione.
-
-# 🟡 FIX 19: Filtri warning specifici, non globali
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -59,7 +55,7 @@ class AISDataPreprocessor:
         
         self.output_features = [
             'delta_SOG', 'delta_COG', 'speed_acc', 'turn_rate', 'dt_prev_hours',
-            'prob_regime_sospetto', 'incertezza_regime'  # Aggiunti da hmm_model.py
+            'prob_regime_sospetto', 'incertezza_regime'  # Aggiunti da bayesian_mixture.py
         ]
         self.target_col = 'target_dark_fleet'
 
@@ -182,8 +178,7 @@ class AISDataPreprocessor:
     def create_causal_target(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Crea il target binario Y con vincoli causali rigorosi.
-        
-        🔴 FIX 6: Implementato prediction_horizon_hours.
+
         Y=1 al tempo t SE E SOLO SE il prossimo gap è un blackout (> gap_threshold)
         E avviene ENTRO l'orizzonte di predizione.
         """

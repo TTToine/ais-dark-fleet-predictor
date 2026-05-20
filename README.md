@@ -2,6 +2,8 @@
 # AIS Dark Fleet Predictor
 **A Hybrid Bayesian Mixture and Gradient Boosting Approach for Intentional Missing Data Forecasting**
 
+![CI](https://github.com/TTToine/ais-dark-fleet-predictor/actions/workflows/ci.yml/badge.svg)
+
 This repository contains an end-to-end Statistical Learning pipeline designed to predict the intentional deactivation of Automatic Identification System (AIS) transponders by maritime vessels. This tactical behavior is frequently associated with "Dark Fleet" operations, including illegal, unreported, and unregulated (IUU) fishing and unauthorized transshipments.
 
 Rather than treating missing data as anomalies to be imputed, this project models the absence of the signal as the primary target variable. The architecture combines the epistemic uncertainty quantification of Bayesian latent models with the non-linear predictive power of tree-based algorithms.
@@ -18,10 +20,12 @@ The project is structured into three isolated modules, strictly designed to prev
    - Kinematic feature engineering (e.g., longitudinal acceleration, rate of turn).
    - Labeling via **Last Ping Prediction**: The target is exclusively anchored to the final valid signal preceding a prolonged blackout.
 
-2. **`src/hmm_model.py` (Bayesian Latent Regime Extraction)**
-   - Implements a **Bayesian Mixture Model (BMM)** — *not* a Hidden Markov Model despite the filename, which is a historical artifact. There is no learned transition matrix and no MCMC/Gibbs sampling.
+2. **`src/bayesian_mixture.py` (Bayesian Latent Regime Extraction)**
+   - Implements a **Bayesian Mixture Model (BMM)** — *not* a Hidden Markov Model. There is no learned transition matrix and no MCMC/Gibbs sampling.
    - Inference is performed via **Automatic Differentiation Variational Inference (ADVI)** in PyMC over a strictly causal rolling window. A Markov smoothing filter is applied *post-hoc* (deterministically) to impose temporal continuity on the posterior probabilities.
-   - The module extracts both the point estimate (`prob_regime_sospetto`: posterior probability of the suspicious regime) and epistemic uncertainty (`incertezza_regime`: posterior variance).
+   - Two-stage **Empirical Bayes**: σ_prior estimated from fleet-pooled pilot fits, then posterior fit per-vessel (partial pooling in spirit; Efron-Morris).
+   - **Model criticism**: prior sensitivity analysis (Spearman ρ across alternative priors) and posterior predictive checks (Gelman BDA3 §6.3) included in the pipeline.
+   - The module extracts `prob_regime_sospetto` (posterior probability of the suspicious regime) as feature for the downstream supervised learner.
 
 3. **`src/gb_training.py` (Supervised Learning & Validation)**
    - Gradient Boosting (`LightGBM`) optimized via `Optuna`.
