@@ -85,7 +85,9 @@ def load_config(config_path: str = "configs/pipeline_config.yaml") -> dict:
             "downsample_minutes": 10,
             "min_sog": 0.0,
             "max_sog": 50.0,
-            "seed": 42
+            "seed": 42,
+            "labeling_strategy": "sliding_window",
+            "labeling_horizon_minutes": 60.0
         },
         "hmm": {
             "window_size": 36,
@@ -245,8 +247,15 @@ def _generate_simulation_study_dataset(n_ships: int = 60,
     mock_records = []
     ground_truth = {"ships": []}
 
+    # Range MMSI realistico (MID 200-799 copre Europa, Africa, Asia maggiore).
+    # int Python ufficiale → resta int64 nel DataFrame, niente promozioni a float.
+    sim_mmsi_pool = rng.choice(
+        np.arange(200_000_000, 800_000_000, dtype=np.int64),
+        size=n_ships, replace=False,
+    )
+
     for ship_idx in range(n_ships):
-        mmsi = 100000000 + ship_idx * 7919  # MMSI sintetici distinti
+        mmsi = int(sim_mmsi_pool[ship_idx])  # MMSI sintetici distinti (int Python → int64)
         is_dark = is_dark_flags[ship_idx]
 
         # Profilo nave
@@ -347,6 +356,10 @@ def _generate_simulation_study_dataset(n_ships: int = 60,
             elapsed_min += sample_dt_min
 
     df = pd.DataFrame(mock_records).sort_values(["MMSI", "Timestamp"]).reset_index(drop=True)
+    # Garanzia di tipo all'uscita del simulator: MMSI deve essere int64.
+    from src.data_prep import _ensure_mmsi_int64
+    df = _ensure_mmsi_int64(df, context="simulator")
+    assert df["MMSI"].dtype == np.int64, "simulator: MMSI not int64 on exit"
     logging.info(
         f"📊 Simulation study: {n_ships} navi ({n_dark} dark, {n_normal} normal), "
         f"{len(df)} ping su {n_days} giorni"
@@ -383,7 +396,7 @@ def run_phase1_preprocessing() -> pd.DataFrame:
             n_days=CONFIG.get("simulation", {}).get("n_days", 7),
             dark_ratio=CONFIG.get("simulation", {}).get("dark_ratio", 0.20),
             bbox=cfg["bounding_box"],
-            seed=cfg["seed"],
+            seed=CONFIG.get("simulation", {}).get("random_seed", cfg["seed"]),
         )
         # Salva ground truth per validazione metodologica successiva
         gt_path = Path(CONFIG["paths"]["models_dir"]) / "simulation_ground_truth.json"
@@ -397,7 +410,19 @@ def run_phase1_preprocessing() -> pd.DataFrame:
         df_valid = preprocessor.validate_physical_plausibility(df_geo)
         df_down = preprocessor.downsample_causal(df_valid)
         df_feat = preprocessor.engineer_causal_features(df_down)
-        df_processed = preprocessor.create_causal_target(df_feat)
+        # Etichettatura: dispatch su labeling_strategy del config.
+        _strategy = CONFIG["data_prep"].get("labeling_strategy", "sliding_window")
+        _hmin = float(CONFIG["data_prep"].get("labeling_horizon_minutes", 60.0))
+        if _strategy == "sliding_window":
+            df_processed = preprocessor.label_sliding_window(df_feat, horizon_minutes=_hmin)
+        elif _strategy == "last_ping":
+            df_processed = preprocessor.label_last_ping(df_feat)
+        else:
+            raise ValueError(f"labeling_strategy='{_strategy}' non valido")
+        logging.info(
+            f"   Labeling strategy: {_strategy}"
+            + (f" (horizon={_hmin} min)" if _strategy == "sliding_window" else "")
+        )
     else:
         df_processed = preprocessor.run_pipeline(
             input_path=CONFIG["paths"]["raw_input"],
@@ -880,10 +905,30 @@ def _run_post_training_analysis(predictor: "DarkFleetPredictor",
 # ========================================================================
 # MAIN ORCHESTRATOR
 # ========================================================================
+def _parse_cli_args():
+    import argparse
+    p = argparse.ArgumentParser(description="AIS Dark Fleet Predictor pipeline")
+    p.add_argument(
+        "--labeling",
+        choices=["sliding_window", "last_ping"],
+        default=None,
+        help=(
+            "Override del labeling_strategy del YAML. "
+            "'sliding_window' è deployable (default), "
+            "'last_ping' è retrospettiva (audit only)."
+        ),
+    )
+    return p.parse_args()
+
+
 def main():
+    args = _parse_cli_args()
     setup_logging_and_dirs()
     logging.info("🚀 AVVIO PIPELINE AIS DARK FLEET PREDICTOR")
-    
+    if args.labeling is not None:
+        CONFIG["data_prep"]["labeling_strategy"] = args.labeling
+        logging.info(f"⚙️  Override CLI: --labeling {args.labeling}")
+
     try:
         df_processed = run_phase1_preprocessing()
         df_hmm = run_phase2_hmm_enrichment(df_processed)

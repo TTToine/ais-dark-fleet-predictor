@@ -23,6 +23,44 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+# =============================================================================
+# MMSI normalization (latent bug killer)
+# =============================================================================
+# Real-world AIS MMSIs are 9-digit integers. Pandas operations like
+# `resample().last()` introduce NaT/NaN rows that promote int64 → float64
+# silently. The promotion breaks downstream joins on MMSI (float-vs-int
+# equality is type-dependent in subtle ways). This helper is the single
+# choke-point: call it after every data materialization step.
+# =============================================================================
+def _ensure_mmsi_int64(df: pd.DataFrame, context: str = "") -> pd.DataFrame:
+    """Rinomina ``mmsi`` → ``MMSI``, dropna su MMSI, cast a int64. Idempotente.
+
+    Args:
+        df: DataFrame in arrivo da load_data / simulator / resample.
+        context: stringa libera per i log (es. "simulator", "load_data").
+
+    Returns:
+        DataFrame con ``df['MMSI'].dtype == np.int64`` garantito.
+    """
+    if 'mmsi' in df.columns and 'MMSI' not in df.columns:
+        df = df.rename(columns={'mmsi': 'MMSI'})
+    if 'MMSI' not in df.columns:
+        return df
+    if df['MMSI'].dtype == np.int64:
+        return df
+    df = df.copy()
+    coerced = pd.to_numeric(df['MMSI'], errors='coerce')
+    n_nan = int(coerced.isna().sum())
+    if n_nan:
+        logging.warning(
+            f"_ensure_mmsi_int64[{context}]: scarto {n_nan} righe con MMSI non numerica."
+        )
+        df = df.loc[coerced.notna()].copy()
+        coerced = coerced.dropna()
+    df['MMSI'] = coerced.astype(np.int64)
+    return df
+
+
 class AISDataPreprocessor:
     """Pipeline di pre-processing per dati AIS marittimi con validazione causale."""
 
@@ -82,6 +120,9 @@ class AISDataPreprocessor:
             raise ValueError(f"Formato non supportato: {path.suffix}")
             
         logging.info(f"Caricate {len(df):,} righe grezze")
+        df = _ensure_mmsi_int64(df, context="load_data")
+        if 'MMSI' in df.columns:
+            assert df['MMSI'].dtype == np.int64, "load_data: MMSI not int64 after coercion"
         return df
 
     def filter_geographic_area(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -129,15 +170,23 @@ class AISDataPreprocessor:
         df = df.sort_values(['MMSI', 'Timestamp']).reset_index(drop=True)
         
         df_indexed = df.set_index('Timestamp')
+        # NB: usiamo `group_keys=True` (default implicito) per garantire che
+        # MMSI compaia come colonna dopo `reset_index()`. `group_keys=False`
+        # rimuoveva MMSI dal MultiIndex e da downstream groupby/labeling.
         df_down = (df_indexed
-                   .groupby('MMSI', group_keys=False)
+                   .groupby('MMSI')
                    .resample(f'{self.downsample_minutes}min')
                    .last()
                    .dropna(subset=['Lat', 'Lon', 'SOG', 'COG'])
                    .reset_index())
         
         df_down['time_diff_min'] = df_down.groupby('MMSI')['Timestamp'].diff().dt.total_seconds() / 60
-        
+
+        # resample().last() promuove silenziosamente int64 → float64.
+        # Riportiamo MMSI a int64 prima di restituirlo, così downstream
+        # label_sliding_window / Bayesian inference vedono il tipo corretto.
+        df_down = _ensure_mmsi_int64(df_down, context="downsample_causal")
+
         logging.info(f"Dopo downsampling: {len(df_down):,} righe, "
                     f"time_diff mediano: {df_down['time_diff_min'].median():.1f} min")
         return df_down
@@ -217,6 +266,88 @@ class AISDataPreprocessor:
             logging.warning(f"⚠️ Classe positiva frequente ({pos_rate:.3f}%).")
             
         return df
+
+    # =====================================================================
+    # ETICHETTATURA RETROSPETTIVA vs DEPLOYABLE
+    # =====================================================================
+    # `create_causal_target` (sopra) implementa la "Last-Ping" framing
+    # retrospettiva: Y=1 SOLO per l'ultimo ping prima di un blackout. Non
+    # deployable in real-time (richiede attesa di `gap_threshold_hours`
+    # per sapere se un ping era "l'ultimo").
+    #
+    # `label_sliding_window` (qui sotto, esposta anche come funzione modulo)
+    # è la formulazione deployable: Y=1 a tempo t se un blackout
+    # > gap_threshold inizierà ENTRO `horizon_minutes` dopo t. Più ping
+    # precedenti il blackout ricevono label positiva; il modello deve
+    # distinguerli dai ping seguiti da operatività normale.
+    # =====================================================================
+    def label_sliding_window(self, df: pd.DataFrame,
+                             horizon_minutes: float = 60.0) -> pd.DataFrame:
+        """Sliding-window deployable labeler.
+
+        Y(t)=1 se esiste un last-ping-before-blackout in (t, t+horizon].
+        Il join è per MMSI; richiede ``df['MMSI'].dtype == int64`` per
+        evitare mismatch silenziosi (float vs int causa join falliti).
+        """
+        assert df['MMSI'].dtype == np.int64, (
+            f"MMSI must be int64 at labeling time, got {df['MMSI'].dtype}. "
+            f"This causes silent join failures. Check load_data() / simulator."
+        )
+        logging.info(
+            f"Sliding-window labeling: blackout>{self.gap_threshold.total_seconds()/3600}h "
+            f"entro {horizon_minutes} min."
+        )
+        df = df.copy().sort_values(['MMSI', 'Timestamp']).reset_index(drop=True)
+
+        # 1) Marca il last-ping-before-blackout (criterio del Last-Ping framing).
+        next_ts = df.groupby('MMSI')['Timestamp'].shift(-1)
+        gap_h = (next_ts - df['Timestamp']).dt.total_seconds() / 3600.0
+        gap_threshold_h = self.gap_threshold.total_seconds() / 3600.0
+        is_last = (gap_h >= gap_threshold_h).fillna(False)
+        df['_is_last_ping_before_blackout'] = is_last.astype(int)
+
+        # 2) Per ogni ping (t, MMSI), label=1 se esiste un last-ping in (t, t+H].
+        horizon = pd.Timedelta(minutes=horizon_minutes)
+        labels = np.zeros(len(df), dtype=int)
+
+        for _, idx_group in df.groupby('MMSI', sort=False).groups.items():
+            sub = df.loc[idx_group, ['Timestamp', '_is_last_ping_before_blackout']]
+            ts_arr = sub['Timestamp'].values
+            last_arr = sub['_is_last_ping_before_blackout'].values
+            last_positions = np.flatnonzero(last_arr == 1)
+            if len(last_positions) == 0:
+                continue
+            last_ts = ts_arr[last_positions]
+            for i, t in enumerate(ts_arr):
+                # last-ping in (t, t+H] — escludo se stesso (t < t_last_ping)
+                upper = pd.Timestamp(t) + horizon
+                in_window = (last_ts > t) & (last_ts <= np.datetime64(upper))
+                if in_window.any():
+                    labels[idx_group[i]] = 1
+
+        df[self.target_col] = labels
+        df = df.drop(columns=['_is_last_ping_before_blackout'])
+
+        pos = int(df[self.target_col].sum())
+        rate = pos / max(len(df), 1) * 100
+        logging.info(
+            f"Sliding-window target: {pos:,} positivi ({rate:.3f}%) su {len(df):,}."
+        )
+        if rate < 0.1:
+            logging.warning(f"⚠️ Classe positiva molto rara ({rate:.3f}%).")
+        return df
+
+    def label_last_ping(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Alias retrocompatibile per ``create_causal_target`` (Last-Ping framing).
+
+        Esposto per simmetria con ``label_sliding_window``. Questa etichettatura
+        è RETROSPETTIVA (non deployable as-is).
+        """
+        assert df['MMSI'].dtype == np.int64, (
+            f"MMSI must be int64 at labeling time, got {df['MMSI'].dtype}. "
+            f"This causes silent join failures. Check load_data() / simulator."
+        )
+        return self.create_causal_target(df)
 
     def add_spatial_features(self, df: pd.DataFrame,
                              coastline_path: Optional[str] = None,
@@ -342,6 +473,43 @@ class AISDataPreprocessor:
         if return_df:
             return df_final
         return None
+
+
+# =============================================================================
+# Module-level convenience wrappers (per `from src.data_prep import ...`)
+# =============================================================================
+_DEFAULT_BBOX_WORLD = {
+    "min_lat": -90.0, "max_lat": 90.0, "min_lon": -180.0, "max_lon": 180.0,
+}
+
+
+def label_sliding_window(df: pd.DataFrame,
+                         horizon_minutes: float = 60.0,
+                         gap_threshold_hours: float = 12.0,
+                         prediction_horizon_hours: float = 24.0,
+                         downsample_minutes: int = 10) -> pd.DataFrame:
+    """Module-level wrapper: identico a ``AISDataPreprocessor.label_sliding_window``."""
+    pp = AISDataPreprocessor(
+        bounding_box=_DEFAULT_BBOX_WORLD,
+        gap_threshold_hours=gap_threshold_hours,
+        prediction_horizon_hours=prediction_horizon_hours,
+        downsample_minutes=downsample_minutes,
+    )
+    return pp.label_sliding_window(df, horizon_minutes=horizon_minutes)
+
+
+def label_last_ping(df: pd.DataFrame,
+                    gap_threshold_hours: float = 12.0,
+                    prediction_horizon_hours: float = 24.0,
+                    downsample_minutes: int = 10) -> pd.DataFrame:
+    """Module-level wrapper: identico a ``AISDataPreprocessor.label_last_ping``."""
+    pp = AISDataPreprocessor(
+        bounding_box=_DEFAULT_BBOX_WORLD,
+        gap_threshold_hours=gap_threshold_hours,
+        prediction_horizon_hours=prediction_horizon_hours,
+        downsample_minutes=downsample_minutes,
+    )
+    return pp.label_last_ping(df)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,16 @@ Rather than treating missing data as anomalies to be imputed, this project model
 
 ---
 
+## Current Data Status: Simulated, Not Real
+
+> **Important: this project currently operates on simulated AIS trajectories, not on real-world AIS feeds.** A built-in simulator (see `configs/pipeline_config.yaml → simulation`) generates vessel kinematics and inserts intentional blackouts at a configurable rate (`dark_ratio`). The metrics reported in this README reflect performance on this simulated distribution.
+>
+> Connecting a real AIS data source (e.g., AISHub, Spire, or equivalent) is planned future work. Once connected, the model will need to be re-validated; numbers on simulated data are an upper-bound estimate, not a deployment expectation. Real-world AIS contains noise sources (transponder errors, GPS jitter, MMSI reassignment, satellite coverage gaps) that the simulator does not currently reproduce.
+>
+> This honesty note is part of the contest narrative: the project demonstrates a complete statistical-learning pipeline with rigorous validation, applied to a controlled synthetic environment that mimics the intended deployment problem.
+
+---
+
 ## System Architecture
 
 The project is structured into three isolated modules, strictly designed to prevent temporal data leakage:
@@ -79,15 +89,18 @@ python run_pipeline.py
 
 ```
 
+> This will generate simulated data (configurable in `configs/pipeline_config.yaml`) and train on it. To use real AIS data, see the `data/real/` directory README (not yet available — TODO).
+
 The script autonomously executes data preparation, Bayesian inference, and HPO training. It exports the trained models alongside interpretability plots (SHAP and Calibration Curves) to the `models/` directory.
 
 ---
 
 ## Limitations and Future Work
 
-1. **Hardware False Positives:** Although rare, catastrophic failures to a vessel's electrical infrastructure generate data gaps identical to intentional deactivations.
-2. **Short Blackouts (False Negatives):** Rapid "tactical" deactivations (e.g., < 6 hours) intended to mask specific maneuvers are not captured by the current 12-hour target threshold. Sensitivity analysis regarding the `gap_threshold_hours` parameter can be configured via the YAML file.
-3. **Concept Drift and Geographic Bias:** The model is calibrated to the navigational dynamics and topology of the Strait of Sicily. Deployment in Out-of-Distribution scenarios (e.g., the Pacific Ocean) will require geographic fine-tuning of the Bayesian priors and complete retraining of the discriminative model.
+1. **Real-data validation pending.** The pipeline has been developed and validated against a configurable AIS simulator. Integration with a live AIS feed and re-validation on real-world trajectories is the immediate next step.
+2. **Hardware False Positives:** Although rare, catastrophic failures to a vessel's electrical infrastructure generate data gaps identical to intentional deactivations.
+3. **Short Blackouts (False Negatives):** Rapid "tactical" deactivations (e.g., < 6 hours) intended to mask specific maneuvers are not captured by the current 12-hour target threshold. Sensitivity analysis regarding the `gap_threshold_hours` parameter can be configured via the YAML file.
+4. **Concept Drift and Geographic Bias:** The model is calibrated to the navigational dynamics and topology of the Strait of Sicily. Deployment in Out-of-Distribution scenarios (e.g., the Pacific Ocean) will require geographic fine-tuning of the Bayesian priors and complete retraining of the discriminative model.
 
 ## 🎨 Dashboard Interattiva
 Il progetto include una dashboard Streamlit completa:

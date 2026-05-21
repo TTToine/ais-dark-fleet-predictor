@@ -13,26 +13,33 @@ data_prep:
   min_sog: 0.0
   max_sog: 50.0
   seed: 42
+  # Target framing: "sliding_window" (deployable) o "last_ping" (retrospettiva, audit).
+  labeling_strategy: "sliding_window"
+  labeling_horizon_minutes: 60.0
 
+# Parametri del simulatore di dati AIS (vedi run_pipeline._generate_simulation_study_dataset).
+# Il progetto opera su DATI SIMULATI: vedere README sezione "Current Data Status".
 simulation:
-  n_ships: 20      # da 60 → 20
-  n_days: 5        # da 7 → 5
-  dark_ratio: 0.30 # più alto: garantisce positivi in ogni fold
+  n_ships: 120        # navi totali nel simulation study
+  n_days: 14          # durata simulazione (giorni)
+  dark_ratio: 0.50    # frazione di navi 'dark fleet' con blackout intenzionali
+  random_seed: 42     # riproducibilità
 
 hmm:
   window_size: 36
   use_advi: true
   n_jobs: 4
   use_empirical_bayes: true
-  eb_n_pilot_vessels: 3      # da 5 → 3
-  eb_n_advi_steps: 300       # da 500 → 300
+  eb_n_pilot_vessels: 3
+  eb_n_advi_steps: 300
   run_prior_sensitivity: true
-  ps_n_vessels: 6            # da 10 → 6
-  ps_n_advi_steps: 200       # da 300 → 200
+  ps_n_vessels: 6
+  ps_n_advi_steps: 200
   run_ppc: true
-  ppc_n_vessels: 2           # da 3 → 2
-  ppc_n_simulations: 100     # da 200 → 100
+  ppc_n_vessels: 2
+  ppc_n_simulations: 100
   ppc_n_advi_steps: 300
+
 gb:
   n_trials: 30
   n_splits: 5
@@ -45,8 +52,3 @@ pipeline:
   run_ablation_study: false
   save_enriched_data: true
   run_post_training_analysis: true
-
-simulation:
-  n_ships: 60          # navi totali nel simulation study
-  n_days: 7            # durata simulazione
-  dark_ratio: 0.20     # frazione di navi 'dark fleet'

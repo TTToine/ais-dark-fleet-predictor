@@ -918,6 +918,14 @@ class CausalBayesianMixture:
             logging.info(f"Avvio inferenza causale (Finestra: {self.window_size}, ADVI: {use_advi}, update_freq: {update_freq}, max_advi_calls: {max_advi_calls}, adaptive_threshold: {adaptive_threshold})...")
             return self._process_single_vessel(df, use_advi, apply_markov, update_freq, max_advi_calls, adaptive_threshold)
 
+        # Invariant: MMSI deve essere int64 prima del per-vessel split.
+        # MMSI float64 produce vessels = array di float, le _process_single_vessel
+        # vedrebbero un identificatore non-canonico e il caching per-MMSI fallirebbe.
+        assert df['MMSI'].dtype == np.int64, (
+            f"MMSI must be int64 at Bayesian inference time, got {df['MMSI'].dtype}. "
+            f"This causes silent join failures. Check load_data() / simulator."
+        )
+
         vessels = df['MMSI'].unique()
         effective_jobs = n_jobs if n_jobs != -1 else max(1, os.cpu_count() - 1)
         effective_jobs = min(effective_jobs, len(vessels))
