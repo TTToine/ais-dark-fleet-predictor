@@ -887,7 +887,20 @@ def main():
     try:
         df_processed = run_phase1_preprocessing()
         df_hmm = run_phase2_hmm_enrichment(df_processed)
-        predictor, final_metrics = run_phase3_gb_training(df_hmm)
+        try:
+            predictor, final_metrics = run_phase3_gb_training(df_hmm)
+        except RuntimeError as hpo_err:
+            # HPO degenere (≥50% trial pruned per assenza positivi): fallisci forte.
+            # NON salvare nessun modello, NON stampare il banner di successo.
+            # Exit 2 → distinguibile da exit 1 (errore generico) per CI/wrapper.
+            if "HPO degenerate" in str(hpo_err):
+                logging.critical("=" * 70)
+                logging.critical("💥 HPO DEGENERE — PIPELINE INTERROTTA SENZA SALVARE MODELLO")
+                logging.critical("=" * 70)
+                logging.critical(str(hpo_err))
+                logging.critical("=" * 70)
+                sys.exit(2)
+            raise
 
         save_artifacts(predictor, final_metrics, df_hmm)
 
@@ -900,7 +913,7 @@ def main():
         logging.info("🎉 "*20)
         logging.info(f"📊 PR-AUC Finale: {final_metrics.get('pr_auc', 'N/A')}")
         logging.info(f"💾 Tutti gli artifact sono in: {CONFIG['paths']['models_dir']}")
-        
+
     except Exception as e:
         logging.critical(f"💥 PIPELINE FALLITA: {e}")
         logging.debug(traceback.format_exc())

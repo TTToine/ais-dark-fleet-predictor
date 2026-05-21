@@ -1,0 +1,113 @@
+{
+  "source_path": "C:\\Users\\Antoine\\Desktop\\Progetti\\GSW\\data\\processed\\ais_enriched.parquet",
+  "config_used": {
+    "bounding_box": {
+      "min_lat": 35.0,
+      "max_lat": 38.0,
+      "min_lon": 11.0,
+      "max_lon": 15.5
+    },
+    "gap_threshold_hours": 12.0,
+    "prediction_horizon_hours": 24.0,
+    "downsample_minutes": 10,
+    "min_sog": 0.0,
+    "max_sog": 50.0,
+    "seed": 42
+  },
+  "inventory": {
+    "n_pings": 56287,
+    "n_unique_mmsi": 60,
+    "ts_min": "2024-06-01 00:00:00",
+    "ts_max": "2024-06-08 00:40:00",
+    "bbox": {
+      "lat_min": 35.000222261689615,
+      "lat_max": 37.99986935079083,
+      "lon_min": 11.000160786703649,
+      "lon_max": 15.49998974702991
+    }
+  },
+  "gaps_raw": {
+    "gap_histogram_hours": {
+      "<1min": 0,
+      "1-10min": 0,
+      "10min-1h": 56199,
+      "1-6h": 8,
+      "6-12h": 8,
+      "12-24h": 12,
+      "1-7d": 0,
+      ">7d": 0
+    },
+    "n_gaps_ge_threshold": 12,
+    "n_unique_mmsi_with_blackout": 9,
+    "top10_mmsi_by_blackout_count": {
+      "100467221.0": 3,
+      "100372193.0": 2,
+      "100087109.0": 1,
+      "100031676.0": 1,
+      "100285084.0": 1,
+      "100308841.0": 1,
+      "100427626.0": 1,
+      "100451383.0": 1,
+      "100182137.0": 1,
+      "100015838.0": 0
+    },
+    "gap_threshold_hours_used": 12.0
+  },
+  "mmsi_type": {
+    "dtype": "float64",
+    "sample_values": [
+      "100000000.0",
+      "100000000.0",
+      "100000000.0"
+    ],
+    "consistency_issue": "CRITICAL: MMSI \u00e8 float64 ma rappresenta un identificativo intero. Confronti tra MMSI possono fallire silenziosamente se altre parti del codice castano a int o str. Forzare a int64 alla load."
+  },
+  "geo_filter": {
+    "applied": true,
+    "bbox": {
+      "min_lat": 35.0,
+      "max_lat": 38.0,
+      "min_lon": 11.0,
+      "max_lon": 15.5
+    },
+    "n_pings_before": 56287,
+    "n_pings_after": 56287,
+    "frac_kept": 1.0,
+    "gaps_after_filter": {
+      "gap_histogram_hours": {
+        "<1min": 0,
+        "1-10min": 0,
+        "10min-1h": 56199,
+        "1-6h": 8,
+        "6-12h": 8,
+        "12-24h": 12,
+        "1-7d": 0,
+        ">7d": 0
+      },
+      "n_gaps_ge_threshold": 12,
+      "n_unique_mmsi_with_blackout": 9,
+      "top10_mmsi_by_blackout_count": {
+        "100467221.0": 3,
+        "100372193.0": 2,
+        "100087109.0": 1,
+        "100031676.0": 1,
+        "100285084.0": 1,
+        "100308841.0": 1,
+        "100427626.0": 1,
+        "100451383.0": 1,
+        "100182137.0": 1,
+        "100015838.0": 0
+      },
+      "gap_threshold_hours_used": 12.0
+    }
+  },
+  "labeling": {
+    "available": false,
+    "reason": "AISDataPreprocessor.label_sliding_window non presente \u2014 la versione corrente di src/data_prep.py potrebbe essere stata ripristinata. Diagnostica labeling saltata."
+  },
+  "summary": {
+    "verdict": "DATA-LIMITED",
+    "recommendation": "Meno di 50 blackout \u226512h nei dati filtrati geograficamente. Il segnale \u00e8 troppo raro per HPO/CV affidabile. Opzioni: (a) abbassare gap_threshold_hours; (b) espandere il bounding box; (c) ricampionare la finestra temporale; (d) riformulare il target.",
+    "n_blackouts_filt": 12
+  }
+}

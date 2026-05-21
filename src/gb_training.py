@@ -255,13 +255,21 @@ class DarkFleetPredictor:
 
         scores = []
         _meta = ['MMSI', 'Timestamp']
+        pos_per_fold_train: List[int] = []
+        pos_per_fold_valid: List[int] = []
 
         for fold, (train_idx, valid_idx) in enumerate(self.cv_splitter.split(X_dynamic)):
             X_train, X_valid = X_dynamic.iloc[train_idx], X_dynamic.iloc[valid_idx]
             y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
+            pos_tr, pos_va = int(y_train.sum()), int(y_valid.sum())
+            pos_per_fold_train.append(pos_tr)
+            pos_per_fold_valid.append(pos_va)
 
-            if y_train.sum() == 0 or y_valid.sum() == 0:
-                logging.debug(f"Fold {fold}: classe positiva assente, skip")
+            if pos_tr == 0 or pos_va == 0:
+                logging.debug(
+                    f"Fold {fold}: classe positiva assente "
+                    f"(train_pos={pos_tr}, val_pos={pos_va}), skip"
+                )
                 continue
 
             X_train_lgb = X_train[dynamic_features].drop(columns=_meta, errors='ignore')
@@ -286,9 +294,23 @@ class DarkFleetPredictor:
             trial.set_user_attr(f'best_iter_fold_{fold}', gbm.best_iteration)
             logging.debug(f"Fold {fold}: PR-AUC={pr_auc:.4f}, best_iter={gbm.best_iteration}")
 
+        # Annotazioni accessibili dall'esterno per la diagnostica HPO degenere.
+        n_folds = len(pos_per_fold_valid)
+        total_val_pos = int(sum(pos_per_fold_valid))
+        trial.set_user_attr('n_folds_seen', n_folds)
+        trial.set_user_attr('total_val_positives', total_val_pos)
+        trial.set_user_attr('pos_per_fold_valid', pos_per_fold_valid)
+        trial.set_user_attr('pos_per_fold_train', pos_per_fold_train)
+
         if not scores:
-            logging.warning("Nessun fold valido valutato")
-            return 0.0
+            # Distinguiamo "0.0 = modello pessimo" da "0.0 = impossibile valutare":
+            # nessun fold con almeno 1 positivo in val → trial PRUNED (escluso dal best).
+            logging.warning(
+                f"Trial pruned: 0 positives across {n_folds} folds "
+                f"(fold positive counts train={pos_per_fold_train} "
+                f"val={pos_per_fold_valid})"
+            )
+            raise optuna.TrialPruned()
 
         return np.mean(scores)
 
@@ -309,9 +331,40 @@ class DarkFleetPredictor:
         study.optimize(lambda trial: self.objective(trial, X, y_train, avail_features),
                        n_trials=self.n_trials, n_jobs=1)
 
+        # =============================================================
+        # Guard rail: HPO degenere → fallisci rumorosamente.
+        # Se >50% dei trial sono stati pruned per "nessun positivo in val"
+        # NON salvare nessun modello: l'utente deve diagnosticare il target,
+        # non collezionare un PR-AUC=0 fake-success dopo ore di compute.
+        # =============================================================
+        from optuna.trial import TrialState
+        n_total = len(study.trials)
+        n_complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE)
+        n_pruned = sum(1 for t in study.trials if t.state == TrialState.PRUNED)
+        if n_pruned > n_total / 2:
+            prevalence = float(y_train.mean()) if len(y_train) else 0.0
+            raise RuntimeError(
+                f"HPO degenerate: {n_pruned}/{n_total} trials had no "
+                f"positive samples in any CV fold. This usually means:\n"
+                f"  - target prevalence too low ({prevalence:.4%})\n"
+                f"  - CV folds too small for the rare-event class\n"
+                f"  - bug in labeling (positives not propagating to splits)\n"
+                f"Run scripts/diagnose_target.py for details before retrying."
+            )
+        if n_complete == 0:
+            raise RuntimeError(
+                f"HPO degenerate: 0/{n_total} trials completed successfully. "
+                f"No best_params to extract."
+            )
+
         self.best_params = study.best_params
         logging.info(f"✅ Migliori parametri trovati: {self.best_params}")
         logging.info(f"📈 Miglior PR-AUC CV: {study.best_value:.4f}")
+        if n_pruned > 0:
+            logging.warning(
+                f"⚠️  {n_pruned}/{n_total} trial pruned per assenza di positivi "
+                f"in val (HPO operato su {n_complete} trial completi)."
+            )
 
         best_trial_iters = [
             v for k, v in study.best_trial.user_attrs.items()
