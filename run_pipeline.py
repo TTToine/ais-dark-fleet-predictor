@@ -104,6 +104,7 @@ def load_config(config_path: str = "configs/pipeline_config.yaml") -> dict:
             "ppc_n_vessels": 3,
             "ppc_n_simulations": 200,
             "ppc_n_advi_steps": 500,
+            "n_advi_iter": 1000,
             "n_jobs": -1
         },
         "gb": {
@@ -502,6 +503,7 @@ def run_phase2_hmm_enrichment(df_processed: pd.DataFrame) -> pd.DataFrame:
         window_size=cfg["window_size"],
         sigma_prior_speed=sigma_speed,
         sigma_prior_turn=sigma_turn,
+        n_advi_iter=int(cfg.get("n_advi_iter", 1000)),
     )
 
     n_ships = df_processed["MMSI"].nunique()
@@ -539,10 +541,43 @@ def run_phase3_gb_training(df_hmm: pd.DataFrame) -> tuple:
         gap_hours=cfg["gap_hours"], freq_min=cfg["freq_min"], seed=cfg["seed"]
     )
 
-    split_idx = int(len(df_hmm) * CONFIG["pipeline"]["train_split_ratio"])
-    train_df = df_hmm.iloc[:split_idx].copy()
-    test_df = df_hmm.iloc[split_idx:].copy()
-    logging.info(f"📅 Split: {len(train_df)} train, {len(test_df)} test")
+    # CONTEST EMERGENCY MODE (2026-05-24): cv_splitter di default è
+    # GroupTimeSeriesSplit (gb_training.py) che con il simulatore degenera
+    # (vedi smoke_test runs). Override con GroupTimeSeriesSplitWithGap
+    # (cv_splitters.py) con horizon esteso a tutto il range simulato.
+    # TODO: refactor pulito post-contest.
+    from src.cv_splitters import GroupTimeSeriesSplitWithGap, holdout_split_by_mmsi
+    predictor.cv_splitter = GroupTimeSeriesSplitWithGap(
+        n_splits=cfg["n_splits"],
+        gap_hours=cfg["gap_hours"],
+        horizon_hours=24.0 * float(CONFIG.get("simulation", {}).get("n_days", 14)),
+        random_state=cfg["seed"],
+    )
+    logging.info(
+        f"⚙️  Override cv_splitter: GroupTimeSeriesSplitWithGap "
+        f"(n_splits={cfg['n_splits']}, gap={cfg['gap_hours']}h, "
+        f"horizon={24*int(CONFIG.get('simulation', {}).get('n_days', 14))}h)"
+    )
+
+    # GROUP-AWARE TRAIN/TEST SPLIT: il vecchio split posizionale 80/20
+    # spaccava le ultime navi nel test causando overfitting in CV ma crollo
+    # sul test (variance enorme: 6 navi sfortunate -> PR-AUC test 0.006 vs CV 0.12).
+    # holdout_split_by_mmsi garantisce navi disgiunte tra cv pool e holdout.
+    holdout_ratio = 1.0 - CONFIG["pipeline"]["train_split_ratio"]
+    train_df, test_df, holdout_mmsis = holdout_split_by_mmsi(
+        df_hmm, holdout_ratio=holdout_ratio, random_state=cfg["seed"],
+    )
+    # Persisti la lista delle MMSI holdout per auditability.
+    holdout_path = Path(CONFIG["paths"]["models_dir"]) / "holdout_mmsis.json"
+    holdout_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(holdout_path, "w", encoding="utf-8") as f:
+        json.dump({"holdout_mmsis": [int(m) for m in holdout_mmsis]}, f, indent=2)
+    logging.info(
+        f"📅 Group-aware split: {len(train_df)} train "
+        f"({train_df['MMSI'].nunique()} navi) / "
+        f"{len(test_df)} test ({test_df['MMSI'].nunique()} navi). "
+        f"Holdout MMSI persistiti in {holdout_path}"
+    )
 
     X_train, y_train = predictor.prepare_data_for_cv(train_df)
     X_test, y_test = predictor.prepare_data_for_cv(test_df)

@@ -15,7 +15,9 @@ data_prep:
   seed: 42
   # Target framing: "sliding_window" (deployable) o "last_ping" (retrospettiva, audit).
   labeling_strategy: "sliding_window"
-  labeling_horizon_minutes: 60.0
+  # 120 min (vs 60) raddoppia il numero di ping positivi per blackout,
+  # portando la prevalenza in CV abbastanza alta da popolare ogni fold val.
+  labeling_horizon_minutes: 120.0
 
 # Parametri del simulatore di dati AIS (vedi run_pipeline._generate_simulation_study_dataset).
 # Il progetto opera su DATI SIMULATI: vedere README sezione "Current Data Status".
@@ -29,6 +31,8 @@ hmm:
   window_size: 36
   use_advi: true
   n_jobs: 4
+  
+  # Empirical Bayes & Validation (i tuoi parametri, vanno benissimo)
   use_empirical_bayes: true
   eb_n_pilot_vessels: 3
   eb_n_advi_steps: 300
@@ -39,11 +43,27 @@ hmm:
   ppc_n_vessels: 2
   ppc_n_simulations: 100
   ppc_n_advi_steps: 300
+  
+  # === PARAMETRI CRITICI PER IL MAIN LOOP (Fase 2) ===
+  # CONTEST EMERGENCY MODE (2026-05-24): valori ridotti per target 30-45 min
+  # di full run. Post-contest tornare a n_advi_iter=500, n_trials=30.
+  n_advi_iter: 300        # smoke ha mostrato convergenza a ~250 di loss in 500 step
+  max_advi_calls: 10
+  adaptive_threshold: 1.5
+  update_freq: 20
+  # Riduco anche il workload analisi diagnostica (sono nice-to-have, non bloccanti)
+  eb_n_pilot_vessels: 3
+  eb_n_advi_steps: 300
+  ps_n_vessels: 4
+  ps_n_advi_steps: 200
+  ppc_n_vessels: 2
+  ppc_n_simulations: 100
+  ppc_n_advi_steps: 300
 
 gb:
-  n_trials: 30
-  n_splits: 5
-  gap_hours: 24.0
+  n_trials: 10             # emergency: 10 trial (vs 30 prod) — convergenza già a ~5
+  n_splits: 3
+  gap_hours: 24.0          # = prediction_horizon → no leakage temporale
   freq_min: 10
   seed: 42
 

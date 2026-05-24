@@ -22,7 +22,25 @@ PR-AUC = 0.0005 (random) with 12 positives total on simulated data.
 - `results/target_diagnostic.json` — canonical copy of post_fix.
 
 ## What remains TODO
-- **Smoke test**: a short-budget end-to-end run (e.g. `n_trials=5`, `n_splits=3`) to validate that Phases 2-3 work with the regenerated data and the HPO guard does NOT trip.
+- **Smoke test**: a short-budget end-to-end run (e.g. `n_trials=5`, `n_splits=3`) to validate that Phases 2-3 work with the regenerated data and the HPO guard does NOT trip. (Done in v2 — `scripts/smoke_test.py` rewritten with `n_advi_iter=500`, 10 vessels with ≥1 positive, hard timeout 30 min, exit code 3 on overrun. v1 ran 7h before being killed because `n_advi_iter` was hardcoded to 1000 in `_process_single_vessel`; now configurable via `hmm.n_advi_iter` YAML key.)
 - **Full pipeline re-run** with production budget, only after the smoke test passes.
 - **Real AIS data connection** (AISHub / Spire / equivalent). Set up `data/real/` with a loader that respects the int64 MMSI invariant.
 - **`hmm_cache.py` cleanup** — file was reverted to the original broken state (bare excepts, hash-randomized key). Will be re-fixed in a later cleanup pass; deliberately out of scope here.
+
+## Technical debt
+- **BMM cache exists but not wired into the per-vessel loop.** `src/bmm_cache.py::BMMCache` is a correct content-addressed cache, but it is currently called only from tests (`tests/test_hmm_cache.py`). The actual `CausalBayesianMixture.process_dataframe_causal` per-vessel loop in `src/bayesian_mixture.py` does NOT consult the cache. Consequence: `BMM_CACHE_DIR` env var is read by nothing in production; smoke and full runs re-fit ADVI from scratch every time. Wiring deferred to a separate PR — we wanted a single clean PR for the smoke-test fix without expanding scope to a cache integration that could introduce bugs in exactly the place where 17h of compute would die.
+
+## Technical debt: cv_leakage_audit() missing
+
+cv_leakage_audit() was implemented in commit c29d62a as part of the
+group-aware CV work. It was lost in a subsequent regression and is
+not currently in src/gb_training.py. The function compared PR-AUC
+obtained with the legacy TimeSeriesSplitWithGap vs the new
+GroupTimeSeriesSplitWithGap, persisting the delta to
+results/cv_leakage_audit.json.
+
+Restoration deferred to a separate PR for two reasons:
+- The audit doubles Phase 3 wall time (trains the model twice).
+- The narrative value (quantifying the leakage that group-blind CV
+  would have hidden) is for the final contest report, not for
+  operational validation of tonight's run.

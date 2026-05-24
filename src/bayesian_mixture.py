@@ -693,62 +693,128 @@ class CausalBayesianMixture:
     - incertezza_regime: Varianza della posterior, segnale di ambiguità comportamentale
     """
 
-    def __init__(self, window_size: int = 36, sigma_prior_speed: float = 1.0, 
-                 sigma_prior_turn: float = 2.0):
+    def __init__(self, window_size: int = 36, sigma_prior_speed: float = 1.0,
+                 sigma_prior_turn: float = 2.0,
+                 n_advi_iter: int = 1000):
+        """
+        Args:
+            n_advi_iter: numero di step ADVI per ogni ``pm.fit`` nel per-vessel
+                main inference loop. Default 1000 (valore di produzione storico).
+                Lo smoke test lo abbassa a 500 per ridurre il tempo per-fit di ~2×.
+                NB: non confondere con ``eb_n_advi_steps`` / ``ps_n_advi_steps`` /
+                ``ppc_n_advi_steps`` che controllano gli ADVI di EB/PS/PPC, non
+                quello del main loop.
+        """
         self.window_size = window_size
         self.sigma_prior_speed = sigma_prior_speed
         self.sigma_prior_turn = sigma_prior_turn
+        self.n_advi_iter = int(n_advi_iter)
         self.model = None
         self.scaler = None
 
     def build_model(self):
-        """Costruisce il grafo computazionale con marginalizzazione esplicita per ADVI."""
+        """Costruisce il grafo computazionale con marginalizzazione esplicita per ADVI.
+
+        Identifiability fixes (basati sui diagnostici 23/05 — PPC fail + prior
+        sensitivity ρ≈0 e su empirical_bayes_priors.json):
+
+        1. **theta Dirichlet asimmetrica** [1, 4]: prior "sospetto è raro"
+           rompe il label-switching che con [1,1] dava theta≈(0.5, 0.5)
+           identicamente su DARK e NOT-DARK.
+        2. **mu_sospetto centrata su -0.06**: i 3 pilot EB concordano
+           mu_sospetto = -0.063 ± 0.055. Prior uniforme N(0, σ=1) lasciava
+           la moda libera di muoversi, perdendo informazione consistente.
+        3. **gap TruncatedNormal(2.5, 0.1)**: i 3 pilot concordano gap=2.478
+           ± 0.048 (std 2% del valore!). Praticamente una costante. Lasciarla
+           libera è la principale sorgente di non-identificabilità.
+        4. **sigma_* cappati a scala dati**: lo StandardScaler impone std=1
+           per costruzione → sigma prior > 1.5 sono non-informative. Il PPC
+           p-value=1.0 su std_speed era la firma di prior troppo loose.
+        """
         with pm.Model() as self.model:
             speed_data = pm.Data("speed_data", np.zeros(self.window_size))
             turn_data = pm.Data("turn_data", np.zeros(self.window_size))
-            
-            # Priors per i pesi della mixture
-            theta = pm.Dirichlet("theta", a=np.array([1.0, 1.0]))
-            
-            # Struttura dei componenti: 0=Sospetto, 1=Transito
-            mu_sospetto = pm.Normal("mu_sospetto", mu=0, sigma=self.sigma_prior_speed)
-            gap = pm.HalfNormal("gap", sigma=self.sigma_prior_speed)
+
+            # FIX 3: Dirichlet asimmetrico (sospetto raro ~20% a priori).
+            theta = pm.Dirichlet("theta", a=np.array([1.0, 4.0]))
+
+            # FIX 2: mu_sospetto centrata sul valore EB cross-vessel.
+            mu_sospetto = pm.Normal("mu_sospetto", mu=-0.06, sigma=0.2)
+
+            # FIX 1: gap quasi-fisso al valore EB (era HalfNormal libera).
+            # TruncatedNormal centrata su 2.5, σ=0.1 → 95% CI ≈ [2.30, 2.70].
+            gap = pm.TruncatedNormal("gap", mu=2.5, sigma=0.1, lower=0.0)
             mu_transito = pm.Deterministic("mu_transito", mu_sospetto + gap)
-            
+
             mu_speed = pm.math.stack([mu_sospetto, mu_transito])
-            sigma_speed = pm.HalfNormal("sigma_speed", sigma=self.sigma_prior_speed, shape=2)
-            sigma_turn = pm.HalfNormal("sigma_turn", sigma=self.sigma_prior_turn, shape=2)
-            
+
+            # FIX 4: sigma cappati a 1.0 / 1.5 (scala dati standardizzati ~1).
+            # Cap min() per usare il valore EB se è già inferiore al floor.
+            sigma_speed_prior = min(float(self.sigma_prior_speed), 1.0)
+            sigma_turn_prior  = min(float(self.sigma_prior_turn),  1.5)
+            sigma_speed = pm.HalfNormal("sigma_speed", sigma=sigma_speed_prior, shape=2)
+            sigma_turn  = pm.HalfNormal("sigma_turn",  sigma=sigma_turn_prior,  shape=2)
+
             # Marginalizzazione manuale della latente: ADVI campiona solo variabili continue
             pm.Mixture("obs_speed", w=theta,
                        comp_dists=[pm.Normal.dist(mu=mu_speed[0], sigma=sigma_speed[0]),
-                                   pm.Normal.dist(mu=mu_speed[1], sigma=sigma_speed[1])], 
+                                   pm.Normal.dist(mu=mu_speed[1], sigma=sigma_speed[1])],
                        observed=speed_data)
-            
-            pm.Mixture("obs_turn", w=theta, 
+
+            pm.Mixture("obs_turn", w=theta,
                        comp_dists=[pm.Normal.dist(mu=0, sigma=sigma_turn[0]),
-                                   pm.Normal.dist(mu=0, sigma=sigma_turn[1])], 
+                                   pm.Normal.dist(mu=0, sigma=sigma_turn[1])],
                        observed=turn_data)
 
     def _calculate_posterior_regime_prob(self, trace, speed_val: float, turn_val: float) -> float:
-        """Calcola P(Regime=0 | x) analiticamente dai parametri continui inferiti."""
-        mu_s = float(trace.posterior["mu_sospetto"].mean())
-        mu_t = float(trace.posterior["mu_transito"].mean())
-        sig_sp = trace.posterior["sigma_speed"].mean().values
-        sig_tr = trace.posterior["sigma_turn"].mean().values
-        w = trace.posterior["theta"].mean().values
-        
-        # Likelihood condizionali
-        lik_speed_0 = np.exp(-0.5 * ((speed_val - mu_s)**2 / sig_sp[0]**2)) / sig_sp[0]
-        lik_speed_1 = np.exp(-0.5 * ((speed_val - mu_t)**2 / sig_sp[1]**2)) / sig_sp[1]
-        lik_turn_0  = np.exp(-0.5 * ((turn_val)**2 / sig_tr[0]**2)) / sig_tr[0]
-        lik_turn_1  = np.exp(-0.5 * ((turn_val)**2 / sig_tr[1]**2)) / sig_tr[1]
-        
-        # Bayes rule: P(k|x) ∝ w_k * L_k
-        lik_0 = w[0] * lik_speed_0 * lik_turn_0
-        lik_1 = w[1] * lik_speed_1 * lik_turn_1
-        
-        return lik_0 / (lik_0 + lik_1 + 1e-12)
+        post = trace.posterior
+        mu_s = float(post["mu_sospetto"].mean())
+        mu_t = float(post["mu_transito"].mean())
+        sig_sp = post["sigma_speed"].mean(dim=["chain", "draw"]).values
+        sig_tr = post["sigma_turn"].mean(dim=["chain", "draw"]).values
+        w      = post["theta"].mean(dim=["chain", "draw"]).values
+
+        # Likelihood condizionali in log-space (evita underflow su punti lontani
+        # dalla media e divisioni per sigma micro-collassati). Aggiungiamo un
+        # floor su sigma per evitare divisioni per zero quando ADVI degenera.
+        SIG_FLOOR = 1e-3
+        sig_sp_safe = np.maximum(sig_sp, SIG_FLOOR)
+        sig_tr_safe = np.maximum(sig_tr, SIG_FLOOR)
+
+        log_lik_speed_0 = -0.5 * ((speed_val - mu_s) / sig_sp_safe[0])**2 - np.log(sig_sp_safe[0])
+        log_lik_speed_1 = -0.5 * ((speed_val - mu_t) / sig_sp_safe[1])**2 - np.log(sig_sp_safe[1])
+        log_lik_turn_0  = -0.5 * ((turn_val)        / sig_tr_safe[0])**2 - np.log(sig_tr_safe[0])
+        log_lik_turn_1  = -0.5 * ((turn_val)        / sig_tr_safe[1])**2 - np.log(sig_tr_safe[1])
+
+        # log P(k|x) ∝ log w_k + log L_k  →  softmax stabile (sottrai max)
+        eps = 1e-12
+        log_p0 = np.log(max(float(w[0]), eps)) + log_lik_speed_0 + log_lik_turn_0
+        log_p1 = np.log(max(float(w[1]), eps)) + log_lik_speed_1 + log_lik_turn_1
+        m = max(log_p0, log_p1)
+        prob = np.exp(log_p0 - m) / (np.exp(log_p0 - m) + np.exp(log_p1 - m))
+
+        # FAIL-LOUD diagnostico: la prima volta che otteniamo non-finite,
+        # logghiamo TUTTO lo stato interno. Senza questo, il NaN viene
+        # silenziato a valle e perdiamo il segnale diagnostico.
+        if not np.isfinite(prob):
+            if not getattr(self, "_nonfinite_logged", False):
+                logging.error(
+                    "[BMM diag] _calculate_posterior_regime_prob produsse NON-FINITE.\n"
+                    f"  speed_val={speed_val!r}, turn_val={turn_val!r}\n"
+                    f"  posterior means: mu_s={mu_s:.4g}, mu_t={mu_t:.4g}\n"
+                    f"  sigma_speed (raw)={sig_sp.tolist()}, sigma_turn (raw)={sig_tr.tolist()}\n"
+                    f"  sigma_speed (floored)={sig_sp_safe.tolist()}, sigma_turn (floored)={sig_tr_safe.tolist()}\n"
+                    f"  theta={w.tolist()}\n"
+                    f"  log_p0={log_p0!r}, log_p1={log_p1!r}, prob={prob!r}\n"
+                    "  → probabile causa: posterior ADVI degenere (mu/sigma collassati su prior). "
+                    "Verifica scala dati vs prior in build_model()."
+                )
+                self._nonfinite_logged = True
+            raise FloatingPointError(
+                f"posterior prob non-finite (prob={prob}, log_p0={log_p0}, log_p1={log_p1})"
+            )
+
+        return float(prob)
 
     def apply_markov_filter(self, probs: np.ndarray, 
                             p_00: float = 0.85, p_11: float = 0.85) -> np.ndarray:
@@ -816,16 +882,23 @@ class CausalBayesianMixture:
         if self.model is None:
             self.build_model()
 
-        n_advi_steps = 1000 if use_advi else 0
+        # Era hardcoded a 1000: ora viene dal costruttore (self.n_advi_iter),
+        # configurabile via YAML `hmm.n_advi_iter`. Default produzione = 1000.
+        # Smoke test passa 500. NB: line 1038 (nuts_compare) usa il suo proprio
+        # 1000 = NUTS samples (non ADVI iter) — INTENZIONALMENTE separato.
+        n_advi_steps = self.n_advi_iter if use_advi else 0
         total_steps = n - self.window_size
 
-        # Distribuisce i call ADVI uniformemente se max_advi_calls è impostato
-        if max_advi_calls is not None and max_advi_calls < total_steps:
-            advi_indices = set(
-                int(round(i)) for i in np.linspace(self.window_size, n - 1, max_advi_calls)
-            )
-        else:
-            advi_indices = None  # usa update_freq o adaptive_threshold
+        # ---------------------------------------------------------------------
+        # HARD CAP su max_advi_calls (counter esplicito).
+        # ---------------------------------------------------------------------
+        # Nuova logica: counter esplicito. `should_update` mantiene la sua
+        # funzione di selettore "vorrei fittare", ma un secondo gate (counter
+        # vs cap) è invulnerabile a stati intermedi del posterior.
+        # max_advi_calls=None → no cap (float('inf')) → comportamento legacy.
+        max_advi = max_advi_calls if max_advi_calls is not None else float('inf')
+        advi_call_count = 0
+        cap_logged = False
 
         last_prob, last_var = None, None
         last_update_t = self.window_size
@@ -834,11 +907,10 @@ class CausalBayesianMixture:
             if t % 500 == 0:
                 logging.info(f"  step {t}/{n}...")
 
-            if advi_indices is not None:
-                should_update = t in advi_indices
-            elif adaptive_threshold is not None:
-                # Update se cambiamento comportamentale supera la soglia
-                # oppure se è passato troppo tempo dall'ultimo update (fallback)
+            # Selettore "vorrei fittare a questo t" (update_freq o adaptive).
+            # NB: rimossa la vecchia branch `advi_indices` — il cap è ora
+            # imposto dal counter sotto, non dalla pre-selezione di indici.
+            if adaptive_threshold is not None:
                 delta_speed = abs(speed_scaled[t] - speed_scaled[t - 1])
                 delta_turn  = abs(turn_scaled[t]  - turn_scaled[t - 1])
                 behavioral_change = delta_speed + delta_turn
@@ -852,11 +924,31 @@ class CausalBayesianMixture:
                 incertezza[t] = last_var
                 continue
 
+            # HARD CAP: anche se should_update=True (o last_prob ancora None),
+            # se siamo al cap riutilizziamo l'ultimo posterior e proseguiamo.
+            # Se last_prob è ancora None (cap raggiunto senza alcun fit
+            # riuscito), lasciamo NaN in probs_sospetto: viene sostituito da
+            # 0.5 a fine funzione, e il var=0 a valle segnalerà
+            # il collasso BMM senza far crashare la pipeline.
+            if advi_call_count >= max_advi:
+                if not cap_logged:
+                    logging.info(
+                        f"max_advi_calls={int(max_advi)} reached at t={t}, "
+                        f"reusing last posterior for remaining {n - t} steps "
+                        f"(last_prob={'set' if last_prob is not None else 'None'})"
+                    )
+                    cap_logged = True
+                if last_prob is not None:
+                    probs_sospetto[t] = last_prob
+                    incertezza[t] = last_var
+                continue
+
             x_speed = speed_scaled[t - self.window_size + 1 : t + 1]
             x_turn = turn_scaled[t - self.window_size + 1 : t + 1]
 
             with self.model:
                 pm.set_data({"speed_data": x_speed, "turn_data": x_turn})
+                advi_call_count += 1  # incrementiamo PRIMA: un attempt fallito consuma comunque uno slot del budget
                 try:
                     if use_advi:
                         mean_field = pm.fit(n=n_advi_steps, method='advi', progressbar=False)
@@ -873,7 +965,15 @@ class CausalBayesianMixture:
                     incertezza[t] = var_t
 
                 except Exception as e:
-                    logging.debug(f"Errore inferenza a t={t}: {e}")
+                    # Promosso da debug (invisibile) → error con traceback completo.
+                    # Senza questo, errori downstream (posterior extraction, shape
+                    # mismatch) verrebbero ingoiati silenziosamente e `last_prob`
+                    # resterebbe None per sempre, propagando NaN fino alla fine.
+                    import traceback as _tb
+                    logging.error(
+                        f"Inferenza fallita a t={t} (advi_call#{advi_call_count}): "
+                        f"{type(e).__name__}: {e}\n{_tb.format_exc()}"
+                    )
                     if last_prob is not None:
                         probs_sospetto[t] = last_prob
                         incertezza[t] = last_var
@@ -881,8 +981,31 @@ class CausalBayesianMixture:
                 finally:
                     gc.collect()
 
-        probs_sospetto = np.where(np.isnan(probs_sospetto), 0.5, probs_sospetto)
-        incertezza = np.where(np.isnan(incertezza), 0.25, incertezza)
+        # FAIL-LOUD: il vecchio `np.where(isnan, 0.5, ...)` mascherava ogni
+        # fallimento del BMM dietro un output costante 0.5 (var=0). Ora
+        # logghiamo esplicitamente la frazione di NaN e falliamo se >= 50%.
+        # I NaN nei primi `window_size` step sono attesi (nessun fit possibile),
+        # quindi vengono esclusi dal computo "post-warmup".
+        nan_mask_all = np.isnan(probs_sospetto)
+        nan_mask_post_warmup = nan_mask_all[self.window_size:]
+        n_nan_post = int(nan_mask_post_warmup.sum())
+        n_post = int(len(nan_mask_post_warmup))
+        frac_nan_post = (n_nan_post / n_post) if n_post else 0.0
+        logging.info(
+            f"  BMM diag: NaN={n_nan_post}/{n_post} post-warmup "
+            f"({frac_nan_post:.1%}); n_advi_calls effettive={advi_call_count}"
+        )
+        if frac_nan_post >= 0.5:
+            raise RuntimeError(
+                f"BMM degenere: {frac_nan_post:.1%} dei step post-warmup sono NaN "
+                f"(advi_calls={advi_call_count}, cap={max_advi}). "
+                "Il modello non sta producendo una posterior valida. "
+                "Vedi log [BMM diag] per i parametri posteriori collassati. "
+                "Probabili cause: prior incompatibili con la scala dati, "
+                "ADVI non convergente, o componente Gaussiana 'vuota'."
+            )
+        # I NaN residui (es. primi window_size step) restano NaN: il downstream
+        # deve trattarli esplicitamente, non vogliamo più riempirli con 0.5.
 
         df_vessel['prob_regime_sospetto'] = probs_sospetto
         df_vessel['incertezza_regime'] = incertezza
@@ -963,6 +1086,10 @@ class CausalBayesianMixture:
     def reset_model_only(self):
         """Resetta solo il modello PyMC, mantiene lo scaler globale tra navi."""
         self.model = None
+        # Resetta il flag diagnostico: vogliamo il dump dello stato interno la
+        # prima volta che ogni nave produce non-finite, non solo la prima volta
+        # in assoluto del processo.
+        self._nonfinite_logged = False
         logging.info("Modello PyMC resettato per nuova nave (scaler mantenuto).")
 
     def reset(self):

@@ -181,11 +181,11 @@ class DarkFleetPredictor:
 
         # incertezza_regime esclusa: è Bernoulli var di prob_regime_sospetto (ridondante)
         self.features_full = [
-            'delta_SOG', 'delta_COG', 'speed_acc', 'turn_rate', 'dt_prev_hours',
-            'prob_regime_sospetto'
+        'SOG', 'COG', 'delta_SOG', 'delta_COG', 'speed_acc', 'turn_rate', 'dt_prev_hours',
+        'prob_regime_sospetto'
         ]
         self.features_baseline = [
-            'delta_SOG', 'delta_COG', 'speed_acc', 'turn_rate', 'dt_prev_hours'
+        'SOG', 'COG', 'delta_SOG', 'delta_COG', 'speed_acc', 'turn_rate', 'dt_prev_hours'
         ]
         self.target = 'target_dark_fleet'
 
@@ -370,7 +370,16 @@ class DarkFleetPredictor:
             v for k, v in study.best_trial.user_attrs.items()
             if k.startswith('best_iter_fold_')
         ]
-        optimal_rounds = int(np.median(best_trial_iters)) if best_trial_iters else 500
+        # FIX: enforce a minimum of 100 boosting rounds. With num_boost_round=1
+# the model degenerates to a single tree and PR-AUC collapses on test set
+# even when CV looks fine (sign of overfitting on the single tree's split).
+        median_iters = int(np.median(best_trial_iters)) if best_trial_iters else 500
+        optimal_rounds = max(median_iters, 100)
+        if median_iters < 100:
+            logging.warning(
+            f"⚠️ Median best_iter from CV was {median_iters}, forced to floor of 100. "
+            f"This usually means early stopping in CV was too aggressive."
+    )
         logging.info(f"📐 num_boost_round ottimale: {optimal_rounds} (mediana su {len(best_trial_iters)} fold del best trial)")
 
         final_param_base = {

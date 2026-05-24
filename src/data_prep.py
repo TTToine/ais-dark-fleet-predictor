@@ -170,15 +170,18 @@ class AISDataPreprocessor:
         df = df.sort_values(['MMSI', 'Timestamp']).reset_index(drop=True)
         
         df_indexed = df.set_index('Timestamp')
-        # NB: usiamo `group_keys=True` (default implicito) per garantire che
-        # MMSI compaia come colonna dopo `reset_index()`. `group_keys=False`
-        # rimuoveva MMSI dal MultiIndex e da downstream groupby/labeling.
+    # NB: groupby('MMSI') + resample() crea un MultiIndex (MMSI, Timestamp).
+    # Poiché 'MMSI' è già una colonna del DataFrame (set_index ha rimosso solo Timestamp),
+    # un .reset_index() secco fallirebbe con "cannot insert MMSI, already exists".
+    # Risolviamo droppando il livello 'MMSI' dall'indice (la colonna esiste già)
+    # e poi resettando il livello 'Timestamp'.
         df_down = (df_indexed
-                   .groupby('MMSI')
-                   .resample(f'{self.downsample_minutes}min')
-                   .last()
-                   .dropna(subset=['Lat', 'Lon', 'SOG', 'COG'])
-                   .reset_index())
+               .groupby('MMSI')
+               .resample(f'{self.downsample_minutes}min')
+               .last()
+               .dropna(subset=['Lat', 'Lon', 'SOG', 'COG'])
+               .reset_index(level='MMSI', drop=True)  # ← rimuove MMSI dall'indice (colonna già presente)
+               .reset_index())                        # ← ora resetta solo Timestamp
         
         df_down['time_diff_min'] = df_down.groupby('MMSI')['Timestamp'].diff().dt.total_seconds() / 60
 

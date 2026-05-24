@@ -25,4 +25,44 @@ logs/
 .idea/
 *.swp
 .DS_Store
+Thumbs.db# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Cache directories
+.cache/
+.mypy_cache/
+
+# OS
+.DS_Store
 Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Build artifacts
+build/
+dist/
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Local presentation files (kept out of repo)
+presentazione_contest.pptx
+*.pptx
+
+# Large local data (uncomment if needed)
+# data/raw/
+# data/processed/
